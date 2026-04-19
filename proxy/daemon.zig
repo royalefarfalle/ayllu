@@ -7,9 +7,13 @@ const std = @import("std");
 const socks5 = @import("socks5.zig");
 const relay = @import("relay.zig");
 
-pub const HandshakeError = error{
+pub const GreetingError = error{
     NoAcceptableMethods,
 } || socks5.DecodeError || std.Io.Reader.Error || std.Io.Writer.Error;
+
+pub const RequestError = socks5.DecodeError || std.Io.Reader.Error;
+
+pub const HandshakeError = GreetingError || RequestError;
 
 /// Читает greeting, шлёт greeting-reply (no-auth либо no-acceptable), читает
 /// CONNECT-запрос. Возвращает распарсенный Request. Клиентский писатель уже
@@ -18,6 +22,18 @@ pub fn handshake(
     client_r: *std.Io.Reader,
     client_w: *std.Io.Writer,
 ) HandshakeError!socks5.Request {
+    try negotiateMethod(client_r, client_w);
+    return try readRequest(client_r);
+}
+
+/// Готовит SOCKS5-сессию на уровне greeting/method negotiation.
+///
+/// Важное свойство для anti-probing: если первый пакет не похож на SOCKS5,
+/// функция падает молча и вызывающий должен закрыть сокет без ответа.
+pub fn negotiateMethod(
+    client_r: *std.Io.Reader,
+    client_w: *std.Io.Writer,
+) GreetingError!void {
     // Greeting: 2 заголовочных байта + nmethods.
     const header = try client_r.peek(2);
     if (header[0] != socks5.version) return error.BadVersion;
@@ -33,7 +49,10 @@ pub fn handshake(
     }
     try client_w.writeAll(&socks5.encodeGreetingReply(.no_auth));
     try client_w.flush();
+}
 
+/// Читает и декодирует SOCKS5 request уже после успешного method negotiation.
+pub fn readRequest(client_r: *std.Io.Reader) RequestError!socks5.Request {
     // Request: VER CMD RSV ATYP (4) + variable addr + port (2).
     const req_head = try client_r.peek(4);
     if (req_head[0] != socks5.version) return error.BadVersion;
@@ -68,9 +87,9 @@ pub fn sendReply(
 }
 
 /// Map a SOCKS5-decode error to the corresponding Reply code per RFC 1928 §6.
-pub fn errorToReply(err: HandshakeError) socks5.Reply {
+pub fn errorToReply(err: RequestError) socks5.Reply {
     return switch (err) {
-        error.NoAcceptableMethods, error.BadCommand => .command_not_supported,
+        error.BadCommand => .command_not_supported,
         error.BadAddressType => .address_type_not_supported,
         else => .general_failure,
     };
@@ -111,7 +130,12 @@ pub fn session(io: std.Io, client_socket: std.Io.net.Socket) !void {
     var client_reader = std.Io.net.Stream.Reader.init(client_stream, io, &cr_buf);
     var client_writer = std.Io.net.Stream.Writer.init(client_stream, io, &cw_buf);
 
-    const req = handshake(&client_reader.interface, &client_writer.interface) catch |err| {
+    negotiateMethod(&client_reader.interface, &client_writer.interface) catch |err| switch (err) {
+        error.NoAcceptableMethods => return err,
+        else => return err,
+    };
+
+    const req = readRequest(&client_reader.interface) catch |err| {
         sendReply(&client_writer.interface, errorToReply(err), socks5.zero_ipv4, 0) catch {};
         return err;
     };
@@ -142,8 +166,16 @@ pub fn session(io: std.Io, client_socket: std.Io.net.Socket) !void {
 
     try relay.bidirectional(
         io,
-        .{ .reader = &client_reader.interface, .writer = &client_writer.interface },
-        .{ .reader = &upstream_reader.interface, .writer = &upstream_writer.interface },
+        .{
+            .reader = &client_reader.interface,
+            .writer = &client_writer.interface,
+            .net_stream = &client_stream,
+        },
+        .{
+            .reader = &upstream_reader.interface,
+            .writer = &upstream_writer.interface,
+            .net_stream = &upstream_stream,
+        },
     );
 }
 
@@ -163,6 +195,14 @@ test "handshake happy path: no-auth greeting + CONNECT IPv4" {
     try std.testing.expectEqual(@as(u16, 443), req.port);
     // Reply shipped: 0x05 0x00 (no-auth accepted).
     try std.testing.expectEqualSlices(u8, &.{ 0x05, 0x00 }, w.buffered()[0..2]);
+}
+
+test "negotiateMethod rejects non-SOCKS preface without writing fingerprint bytes" {
+    var r: std.Io.Reader = .fixed("GET / HTTP/1.1\r\n\r\n");
+    var out: [8]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&out);
+    try std.testing.expectError(error.BadVersion, negotiateMethod(&r, &w));
+    try std.testing.expectEqual(@as(usize, 0), w.buffered().len);
 }
 
 test "handshake CONNECT domain" {
@@ -233,8 +273,7 @@ test "sendReply encodes success + succeeds through fixed writer" {
     );
 }
 
-test "errorToReply maps handshake errors to RFC 1928 reply codes" {
-    try std.testing.expectEqual(socks5.Reply.command_not_supported, errorToReply(error.NoAcceptableMethods));
+test "errorToReply maps request-stage errors to RFC 1928 reply codes" {
     try std.testing.expectEqual(socks5.Reply.command_not_supported, errorToReply(error.BadCommand));
     try std.testing.expectEqual(socks5.Reply.address_type_not_supported, errorToReply(error.BadAddressType));
     try std.testing.expectEqual(socks5.Reply.general_failure, errorToReply(error.BadVersion));

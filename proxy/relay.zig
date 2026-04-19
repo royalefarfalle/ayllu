@@ -24,16 +24,49 @@ pub fn pipeAll(src: *std.Io.Reader, dst: *std.Io.Writer) PipeError!usize {
 pub const Stream = struct {
     reader: *std.Io.Reader,
     writer: *std.Io.Writer,
+    net_stream: ?*const std.Io.net.Stream = null,
 };
 
 /// Параллельно запускает два `pipeAll`: client.reader → upstream.writer и
-/// upstream.reader → client.writer. Возвращается, когда ОБА направления
-/// закрылись (EOF или ошибка). Вызывающий сам закрывает сокеты после.
+/// upstream.reader → client.writer. После завершения первого направления
+/// делает half-close на peer'е и дожидается второго, чтобы обычный FIN не
+/// превращался в зависший таск.
 pub fn bidirectional(io: std.Io, client: Stream, upstream: Stream) !void {
-    var up = io.async(pipeAll, .{ client.reader, upstream.writer });
-    var down = io.async(pipeAll, .{ upstream.reader, client.writer });
-    _ = up.await(io) catch {};
-    _ = down.await(io) catch {};
+    const Outcome = union(enum) {
+        up: PipeError!usize,
+        down: PipeError!usize,
+    };
+
+    var select_buf: [2]Outcome = undefined;
+    var select = std.Io.Select(Outcome).init(io, &select_buf);
+    defer select.cancelDiscard();
+
+    select.async(.up, pipeAll, .{ client.reader, upstream.writer });
+    select.async(.down, pipeAll, .{ upstream.reader, client.writer });
+
+    switch (try select.await()) {
+        .up => |up_res| {
+            _ = try up_res;
+            halfCloseSend(upstream, io);
+            switch (try select.await()) {
+                .down => |down_res| _ = try down_res,
+                .up => unreachable,
+            }
+        },
+        .down => |down_res| {
+            _ = try down_res;
+            halfCloseSend(client, io);
+            switch (try select.await()) {
+                .up => |up_res| _ = try up_res,
+                .down => unreachable,
+            }
+        },
+    }
+}
+
+fn halfCloseSend(stream: Stream, io: std.Io) void {
+    const net_stream = stream.net_stream orelse return;
+    net_stream.shutdown(io, .send) catch {};
 }
 
 test "pipeAll copies fixed reader into fixed writer" {
