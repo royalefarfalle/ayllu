@@ -302,3 +302,120 @@ test "buildAndSign includes sender fingerprint in from" {
     const env = try buildAndSign(io, alice, .broadcast, 0, 1, "p");
     try std.testing.expectEqualSlices(u8, &alice.fingerprint(), &env.from);
 }
+
+test "signature over golden digest is stable — EdDSA determinism + wire format" {
+    // EdDSA with null noise is deterministic, so signing a pinned digest with a
+    // pinned identity must reproduce the same 64 bytes. Catches any regression
+    // that switches to hedged signing, changes noise handling, or alters the
+    // sign-over-digest wiring.
+    const alice = try Identity.fromSeed(@splat(0x01));
+    var digest: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(
+        &digest,
+        "38d26a22a82c740ece03c8522e93d22d8084e53df91583b38f4e3290be1a3f32",
+    );
+    const sig = try alice.sign(&digest);
+    var expected: [64]u8 = undefined;
+    _ = try std.fmt.hexToBytes(
+        &expected,
+        "7b701a7ccc8d5b971d2c7d2a64ac33dffe54456639c76d773c52d41ccabcddc9" ++
+            "a4c4552954f5d787dc23b4a2f265d93fa68a0f7908c4f5fb65bf976f4a23ab07",
+    );
+    try std.testing.expectEqualSlices(u8, &expected, &sig.toBytes());
+}
+
+test "verify rejects envelope with mutant PublicIdentity (Alice ed + Bob x)" {
+    const io = std.testing.io;
+    const alice = try Identity.fromSeed(@splat(0x20));
+    const bob = try Identity.fromSeed(@splat(0x21));
+    const env = try buildAndSign(io, alice, .broadcast, 0, 1, "p");
+    const mutant: PublicIdentity = .{
+        .ed_public_key = alice.ed25519.public_key,
+        .x_public_key = bob.x25519.public_key,
+    };
+    try std.testing.expectError(error.FingerprintMismatch, env.verify(mutant));
+}
+
+test "verify rejects tampered signature bytes" {
+    const io = std.testing.io;
+    const alice = try Identity.fromSeed(@splat(0x30));
+    var env = try buildAndSign(io, alice, .broadcast, 0, 1, "p");
+    var sig_bytes = env.signature.toBytes();
+    sig_bytes[0] ^= 0x01;
+    env.signature = crypto.Ed25519.Signature.fromBytes(sig_bytes);
+    try std.testing.expectError(
+        error.SignatureVerificationFailed,
+        env.verify(alice.publicView()),
+    );
+}
+
+test "verify rejects tampered envelope id" {
+    const io = std.testing.io;
+    const alice = try Identity.fromSeed(@splat(0x31));
+    var env = try buildAndSign(io, alice, .broadcast, 0, 1, "p");
+    env.id[0] ^= 0x01;
+    try std.testing.expectError(
+        error.SignatureVerificationFailed,
+        env.verify(alice.publicView()),
+    );
+}
+
+test "verify rejects tampered from — FingerprintMismatch precedes signature check" {
+    const io = std.testing.io;
+    const alice = try Identity.fromSeed(@splat(0x32));
+    var env = try buildAndSign(io, alice, .broadcast, 0, 1, "p");
+    env.from[0] ^= 0x01;
+    try std.testing.expectError(error.FingerprintMismatch, env.verify(alice.publicView()));
+}
+
+test "verify rejects multicast rewritten to fingerprint of same fp" {
+    const io = std.testing.io;
+    const alice = try Identity.fromSeed(@splat(0x33));
+    const group_id: crypto.Fingerprint = @splat(0xCC);
+    var env = try buildAndSign(io, alice, .{ .multicast = group_id }, 0, 1, "p");
+    env.to = .{ .fingerprint = group_id };
+    try std.testing.expectError(
+        error.SignatureVerificationFailed,
+        env.verify(alice.publicView()),
+    );
+}
+
+test "buildAndSign + verify — empty payload" {
+    const io = std.testing.io;
+    const alice = try Identity.fromSeed(@splat(0x34));
+    const env = try buildAndSign(io, alice, .broadcast, 0, 1, "");
+    try env.verify(alice.publicView());
+}
+
+test "version = 0 is rejected" {
+    const io = std.testing.io;
+    const alice = try Identity.fromSeed(@splat(0x35));
+    var env = try buildAndSign(io, alice, .broadcast, 0, 1, "p");
+    env.version = 0;
+    try std.testing.expectError(error.WrongVersion, env.verify(alice.publicView()));
+}
+
+test "isExpired — created_at == expires_at is born-expired at that instant" {
+    const io = std.testing.io;
+    const alice = try Identity.fromSeed(@splat(0x36));
+    const env = try buildAndSign(io, alice, .broadcast, 1000, 1000, "p");
+    try std.testing.expect(!env.isExpired(999));
+    try std.testing.expect(env.isExpired(1000));
+}
+
+test "signature roundtrips through toBytes/fromBytes" {
+    const io = std.testing.io;
+    const alice = try Identity.fromSeed(@splat(0x37));
+    var env = try buildAndSign(io, alice, .broadcast, 0, 1, "wire");
+    const bytes = env.signature.toBytes();
+    env.signature = crypto.Ed25519.Signature.fromBytes(bytes);
+    try env.verify(alice.publicView());
+}
+
+test "envelope digest domain-separates from crypto.fingerprint space" {
+    const ed_shape: [32]u8 = @splat(0xAA);
+    const x_shape: [32]u8 = @splat(0xAA);
+    const fp = crypto.fingerprint(ed_shape, x_shape);
+    const env_d = computeDigest(current_version, @splat(0), ed_shape, .broadcast, 0, 0, "");
+    try std.testing.expect(!std.mem.eql(u8, &fp, &env_d));
+}

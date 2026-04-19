@@ -27,3 +27,9 @@ test "ayllu public surface exposes identity.Identity" {
     const id = try ayllu.identity.Identity.fromSeed(@splat(0));
     _ = id.fingerprint();
 }
+
+test "ayllu public surface exposes envelope.buildAndSign" {
+    const id = try ayllu.identity.Identity.fromSeed(@splat(0));
+    const env = try ayllu.envelope.buildAndSign(std.testing.io, id, .broadcast, 0, 1, "p");
+    try env.verify(id.publicView());
+}
