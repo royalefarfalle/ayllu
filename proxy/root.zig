@@ -7,10 +7,12 @@
 
 pub const socks5 = @import("socks5.zig");
 pub const relay = @import("relay.zig");
+pub const daemon = @import("daemon.zig");
 
 test {
     _ = socks5;
     _ = relay;
+    _ = daemon;
 }
 
 test "proxy public surface exposes socks5.decodeGreeting + decodeRequest" {
