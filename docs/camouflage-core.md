@@ -2,6 +2,9 @@
 
 Этот пакет уже не пустой, но важно честно фиксировать его границы.
 
+Если нужен уже runnable путь "локальный bridge -> camouflage gateway ->
+inner SOCKS5", см. `docs/camouflage-runtime.md`.
+
 ## Что уже реализовано
 
 - `camouflage/reality.zig`
