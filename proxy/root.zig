@@ -10,3 +10,11 @@ pub const socks5 = @import("socks5.zig");
 test {
     _ = socks5;
 }
+
+test "proxy public surface exposes socks5.decodeGreeting + decodeRequest" {
+    const std = @import("std");
+    const g = try socks5.decodeGreeting(&[_]u8{ 0x05, 0x01, 0x00 });
+    try std.testing.expect(g.offersNoAuth());
+    const r = try socks5.decodeRequest(&[_]u8{ 0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 80 });
+    try std.testing.expectEqual(socks5.Command.connect, r.command);
+}

@@ -26,6 +26,10 @@ pub const AddressKind = enum(u8) {
 
 pub const Address = union(AddressKind) {
     ipv4: [4]u8,
+    /// Raw wire bytes. NOT validated: may contain NUL / CR / LF / non-ASCII /
+    /// arbitrary junk. Caller MUST validate (RFC 1035 LDH or equivalent)
+    /// before resolving or logging, or a client can produce a log-vs-action
+    /// split (log says `attacker.com\x00evil.com`, libc resolves `attacker.com`).
     domain: []const u8,
     ipv6: [16]u8,
 };
@@ -50,6 +54,11 @@ pub const DecodeError = error{
     BadAddressType,
     BadReserved,
     EmptyDomain,
+};
+
+pub const EncodeError = error{
+    ShortBuffer,
+    DomainTooLong,
 };
 
 pub const Greeting = struct {
@@ -111,7 +120,9 @@ pub fn decodeRequest(buf: []const u8) DecodeError!Request {
             if (buf.len < addr_start + 1) return error.ShortBuffer;
             const domain_len = buf[addr_start];
             if (domain_len == 0) return error.EmptyDomain;
-            port_start = addr_start + 1 + domain_len;
+            // domain_len is u8 (max 255); widen to usize before adding to
+            // avoid u8 overflow when domain_len > 250.
+            port_start = addr_start + 1 + @as(usize, domain_len);
             if (buf.len < port_start + 2) return error.ShortBuffer;
             addr = .{ .domain = buf[addr_start + 1 .. port_start] };
         },
@@ -126,9 +137,14 @@ pub fn decodeRequest(buf: []const u8) DecodeError!Request {
     };
 }
 
-/// Encodes a SOCKS5 reply into `out`. Returns the written slice.
-/// Caller must size `out` to at least `replySize(address)`.
-pub fn encodeReply(out: []u8, reply: Reply, address: Address, port: u16) error{ShortBuffer}![]u8 {
+/// Encodes a SOCKS5 reply into `out`. Returns the written slice (may be
+/// shorter than `out`). Caller MUST write only the returned slice to the
+/// peer — tail bytes are untouched, not zeroed, so reusing `out` across
+/// connections without reading only the returned slice leaks prior bytes.
+/// `address == .domain` with `name.len > 255` returns DomainTooLong because
+/// the wire-format length byte is u8.
+pub fn encodeReply(out: []u8, reply: Reply, address: Address, port: u16) EncodeError![]u8 {
+    if (address == .domain and address.domain.len > 255) return error.DomainTooLong;
     const size = replySize(address);
     if (out.len < size) return error.ShortBuffer;
     out[0] = version;
@@ -367,4 +383,215 @@ test "CONNECT IPv4 roundtrip: decode then re-encode matches" {
         &.{ 0x05, 0x00, 0x00, 0x01, 192, 168, 1, 1, 0x01, 0xBB },
         reencoded,
     );
+}
+
+test "CONNECT IPv6 + domain request bytes mirror the reply-side encoder" {
+    // Roundtrip matrix: encode address via replySize/encodeReply, hand-craft
+    // a request around it, decode, assert address + port match.
+    inline for (.{
+        Address{ .ipv4 = .{ 1, 2, 3, 4 } },
+        Address{ .ipv6 = @splat(0x11) },
+        Address{ .domain = "a.example.com" },
+    }) |addr| {
+        var req_buf: [300]u8 = undefined;
+        req_buf[0] = version;
+        req_buf[1] = @intFromEnum(Command.connect);
+        req_buf[2] = 0x00;
+        req_buf[3] = @intFromEnum(std.meta.activeTag(addr));
+        var cursor: usize = 4;
+        switch (addr) {
+            .ipv4 => |bytes| {
+                @memcpy(req_buf[cursor..][0..4], &bytes);
+                cursor += 4;
+            },
+            .ipv6 => |bytes| {
+                @memcpy(req_buf[cursor..][0..16], &bytes);
+                cursor += 16;
+            },
+            .domain => |name| {
+                req_buf[cursor] = @intCast(name.len);
+                cursor += 1;
+                @memcpy(req_buf[cursor..][0..name.len], name);
+                cursor += name.len;
+            },
+        }
+        std.mem.writeInt(u16, req_buf[cursor..][0..2], 0x1F90, .big);
+        cursor += 2;
+        const r = try decodeRequest(req_buf[0..cursor]);
+        try std.testing.expectEqual(@as(u16, 8080), r.port);
+        try std.testing.expectEqual(std.meta.activeTag(addr), std.meta.activeTag(r.address));
+    }
+}
+
+test "wire-format constants match RFC 1928 bytes" {
+    // Locks the on-wire byte for each enum. A reordering / renumbering of
+    // these enums would compile clean but break interop with every other
+    // SOCKS5 implementation on earth.
+    try std.testing.expectEqual(@as(u8, 0x05), version);
+    try std.testing.expectEqual(@as(u8, 0x00), @intFromEnum(Method.no_auth));
+    try std.testing.expectEqual(@as(u8, 0xFF), @intFromEnum(Method.no_acceptable));
+    try std.testing.expectEqual(@as(u8, 0x01), @intFromEnum(Command.connect));
+    try std.testing.expectEqual(@as(u8, 0x02), @intFromEnum(Command.bind));
+    try std.testing.expectEqual(@as(u8, 0x03), @intFromEnum(Command.udp_associate));
+    try std.testing.expectEqual(@as(u8, 0x01), @intFromEnum(AddressKind.ipv4));
+    try std.testing.expectEqual(@as(u8, 0x03), @intFromEnum(AddressKind.domain));
+    try std.testing.expectEqual(@as(u8, 0x04), @intFromEnum(AddressKind.ipv6));
+    try std.testing.expectEqual(@as(u8, 0x00), @intFromEnum(Reply.succeeded));
+    try std.testing.expectEqual(@as(u8, 0x07), @intFromEnum(Reply.command_not_supported));
+    try std.testing.expectEqual(@as(u8, 0x08), @intFromEnum(Reply.address_type_not_supported));
+}
+
+test "KAT: curl --socks5-hostname greeting + CONNECT to example.com:80" {
+    // Representative of what curl 8.x / Telegram Desktop send. Pinning the
+    // exact bytes catches future decoder drift from real-world clients
+    // without needing a live proxy.
+    const greeting = [_]u8{ 0x05, 0x01, 0x00 };
+    const g = try decodeGreeting(&greeting);
+    try std.testing.expect(g.offersNoAuth());
+    try std.testing.expectEqual(@as(usize, 3), g.bytes_consumed);
+
+    const connect = [_]u8{
+        0x05, 0x01, 0x00, 0x03,
+        0x0B, 'e', 'x',  'a',
+        'm',  'p',  'l',  'e',
+        '.',  'c',  'o',  'm',
+        0x00, 0x50,
+    };
+    const r = try decodeRequest(&connect);
+    try std.testing.expectEqual(Command.connect, r.command);
+    try std.testing.expectEqualStrings("example.com", r.address.domain);
+    try std.testing.expectEqual(@as(u16, 80), r.port);
+}
+
+test "decodeRequest preserves embedded NUL / CRLF / non-ASCII in domain" {
+    // Parser contract is "bytes verbatim". Caller is the one that must
+    // sanitize before DNS / logs — see doc-comment on Address.domain.
+    const ugly = "evil.com\x00\r\n\xFF";
+    var buf: [5 + ugly.len + 2]u8 = undefined;
+    buf[0..5].* = .{ 0x05, 0x01, 0x00, 0x03, @intCast(ugly.len) };
+    @memcpy(buf[5 .. 5 + ugly.len], ugly);
+    std.mem.writeInt(u16, buf[5 + ugly.len ..][0..2], 443, .big);
+    const r = try decodeRequest(&buf);
+    try std.testing.expectEqualSlices(u8, ugly, r.address.domain);
+}
+
+test "decodeRequest domain-form accepts IPv4-literal string (ATYP intent is caller's)" {
+    const dotted = "192.168.1.1";
+    var buf: [5 + dotted.len + 2]u8 = undefined;
+    buf[0..5].* = .{ 0x05, 0x01, 0x00, 0x03, @intCast(dotted.len) };
+    @memcpy(buf[5 .. 5 + dotted.len], dotted);
+    std.mem.writeInt(u16, buf[5 + dotted.len ..][0..2], 443, .big);
+    const r = try decodeRequest(&buf);
+    try std.testing.expectEqualStrings(dotted, r.address.domain);
+}
+
+test "decodeRequest with minimum (1-byte) and maximum (255-byte) domain" {
+    // 1-byte
+    const short_buf = [_]u8{ 0x05, 0x01, 0x00, 0x03, 0x01, 'a', 0x00, 0x50 };
+    const short_r = try decodeRequest(&short_buf);
+    try std.testing.expectEqualStrings("a", short_r.address.domain);
+    try std.testing.expectEqual(short_buf.len, short_r.bytes_consumed);
+
+    // 255-byte
+    var long: [255]u8 = undefined;
+    @memset(&long, 'z');
+    var long_buf: [5 + 255 + 2]u8 = undefined;
+    long_buf[0..5].* = .{ 0x05, 0x01, 0x00, 0x03, 0xFF };
+    @memcpy(long_buf[5..260], &long);
+    std.mem.writeInt(u16, long_buf[260..][0..2], 443, .big);
+    const long_r = try decodeRequest(&long_buf);
+    try std.testing.expectEqual(@as(usize, 255), long_r.address.domain.len);
+    try std.testing.expectEqual(long_buf.len, long_r.bytes_consumed);
+}
+
+test "decodeGreeting with nmethods=255 (maximum)" {
+    var buf: [2 + 255]u8 = undefined;
+    buf[0] = 0x05;
+    buf[1] = 0xFF;
+    for (buf[2..], 0..) |*slot, i| slot.* = @intCast(i);
+    const g = try decodeGreeting(&buf);
+    try std.testing.expectEqual(@as(usize, 255), g.methods.len);
+    try std.testing.expectEqual(@as(usize, 257), g.bytes_consumed);
+    try std.testing.expect(g.offersNoAuth()); // index 0 is 0x00
+}
+
+test "no-acceptable method flow: decode, predicate, encodeGreetingReply" {
+    const g = try decodeGreeting(&[_]u8{ 0x05, 0x01, 0xFF });
+    try std.testing.expect(!g.offersNoAuth());
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0x05, 0xFF },
+        &encodeGreetingReply(.no_acceptable),
+    );
+}
+
+test "port boundaries 0 and 65535 roundtrip through decode + encode" {
+    for ([_]u16{ 0, 65535 }) |port| {
+        var req: [10]u8 = undefined;
+        req[0..4].* = .{ 0x05, 0x01, 0x00, 0x01 };
+        @memset(req[4..8], 0);
+        std.mem.writeInt(u16, req[8..10], port, .big);
+        const r = try decodeRequest(&req);
+        try std.testing.expectEqual(port, r.port);
+
+        var out: [10]u8 = undefined;
+        const written = try encodeReply(&out, .succeeded, zero_ipv4, port);
+        try std.testing.expectEqualSlices(u8, req[8..10], written[8..10]);
+    }
+}
+
+test "encodeReply covers every Reply code with every ATYP" {
+    inline for (&[_]Reply{
+        .succeeded,
+        .general_failure,
+        .not_allowed,
+        .network_unreachable,
+        .host_unreachable,
+        .connection_refused,
+        .ttl_expired,
+        .command_not_supported,
+        .address_type_not_supported,
+    }) |reply| {
+        inline for (&[_]Address{
+            zero_ipv4,
+            .{ .ipv6 = @splat(0) },
+            .{ .domain = "host" },
+        }) |addr| {
+            var out: [300]u8 = undefined;
+            const written = try encodeReply(&out, reply, addr, 0);
+            try std.testing.expectEqual(@as(u8, version), written[0]);
+            try std.testing.expectEqual(@intFromEnum(reply), written[1]);
+            try std.testing.expectEqual(@as(u8, 0x00), written[2]);
+            try std.testing.expectEqual(@intFromEnum(std.meta.activeTag(addr)), written[3]);
+        }
+    }
+}
+
+test "encodeReply leaves tail of out buffer untouched (no info leak)" {
+    var out: [50]u8 = undefined;
+    @memset(&out, 0xAA);
+    const written = try encodeReply(&out, .succeeded, zero_ipv4, 0);
+    try std.testing.expect(written.len < out.len);
+    for (out[written.len..]) |byte| {
+        try std.testing.expectEqual(@as(u8, 0xAA), byte);
+    }
+}
+
+test "encodeReply rejects domain > 255 bytes with DomainTooLong" {
+    var out: [300]u8 = undefined;
+    var long: [256]u8 = undefined;
+    @memset(&long, 'a');
+    try std.testing.expectError(
+        error.DomainTooLong,
+        encodeReply(&out, .succeeded, .{ .domain = &long }, 0),
+    );
+}
+
+test "encodeReply accepts domain = 255 bytes exactly" {
+    var out: [300]u8 = undefined;
+    var name: [255]u8 = undefined;
+    @memset(&name, 'a');
+    const written = try encodeReply(&out, .succeeded, .{ .domain = &name }, 0);
+    try std.testing.expectEqual(@as(u8, 255), written[4]);
+    try std.testing.expectEqual(@as(usize, 4 + 1 + 255 + 2), written.len);
 }
