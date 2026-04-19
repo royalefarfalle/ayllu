@@ -22,6 +22,8 @@ pub fn main(init: std.process.Init) !void {
     var proxy_config: ayllu_proxy.daemon.Config = .{};
     var server_names = std.ArrayList([]const u8).empty;
     var short_ids = std.ArrayList(ayllu_camouflage.reality.ShortId).empty;
+    var cover_target: ?ayllu_camouflage.reverse_proxy.CoverTarget = null;
+    var rate_limit_cfg: ayllu_camouflage.rate_limit.Config = .{};
 
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
@@ -76,6 +78,22 @@ pub fn main(init: std.process.Init) !void {
             i += 1;
             if (i >= args.len) return error.MissingMaxClientVerValue;
             max_client_version = std.SemanticVersion.parse(args[i]) catch return error.BadMaxClientVerValue;
+        } else if (std.mem.eql(u8, args[i], "--cover-target")) {
+            i += 1;
+            if (i >= args.len) return error.MissingCoverTargetValue;
+            cover_target = try parseCoverTarget(args[i]);
+        } else if (std.mem.eql(u8, args[i], "--admission-fail-threshold")) {
+            i += 1;
+            if (i >= args.len) return error.MissingAdmissionFailThresholdValue;
+            rate_limit_cfg.failures_per_window = std.fmt.parseInt(u32, args[i], 10) catch return error.BadAdmissionFailThresholdValue;
+        } else if (std.mem.eql(u8, args[i], "--admission-window-ms")) {
+            i += 1;
+            if (i >= args.len) return error.MissingAdmissionWindowValue;
+            rate_limit_cfg.window_ms = std.fmt.parseInt(i64, args[i], 10) catch return error.BadAdmissionWindowValue;
+        } else if (std.mem.eql(u8, args[i], "--admission-silent-ms")) {
+            i += 1;
+            if (i >= args.len) return error.MissingAdmissionSilentValue;
+            rate_limit_cfg.silent_duration_ms = std.fmt.parseInt(i64, args[i], 10) catch return error.BadAdmissionSilentValue;
         } else if (std.mem.eql(u8, args[i], "--help") or std.mem.eql(u8, args[i], "-h")) {
             try printUsage(io);
             return;
@@ -103,8 +121,12 @@ pub fn main(init: std.process.Init) !void {
                 .token_policy = token_policy,
             },
             .proxy = proxy_config,
+            .cover_target = cover_target,
+            .rate_limit = rate_limit_cfg,
         },
     };
+    state.initLimiter(gpa);
+    defer state.deinitLimiter();
 
     const addr = listen_addr orelse try std.Io.net.IpAddress.parse(listen_host, listen_port);
     var server = try addr.listen(io, .{ .reuse_address = true });
@@ -158,10 +180,37 @@ fn printUsage(io: std.Io) !void {
         \\  --token-max-future-slots N accepted future slots (default 1)
         \\  --min-client-ver X.Y.Z     minimum client version
         \\  --max-client-ver X.Y.Z     maximum client version
+        \\  --cover-target HOST:PORT   honest reverse-proxy destination for
+        \\                             failed admissions (default: static 404)
+        \\  --admission-fail-threshold N  failures/window before silent-drop
+        \\                             (default 20)
+        \\  --admission-window-ms N    window length for failure count
+        \\                             (default 60000)
+        \\  --admission-silent-ms N    how long to drop silently after trip
+        \\                             (default 300000)
         \\  --help                     show this help
         \\
     );
     try w.interface.flush();
+}
+
+fn parseCoverTarget(spec: []const u8) !ayllu_camouflage.reverse_proxy.CoverTarget {
+    const colon = std.mem.lastIndexOfScalar(u8, spec, ':') orelse
+        return .{ .host = spec, .port = 443 };
+    const port = std.fmt.parseInt(u16, spec[colon + 1 ..], 10) catch return error.BadCoverTargetValue;
+    return .{ .host = spec[0..colon], .port = port };
+}
+
+test "parseCoverTarget: HOST:PORT" {
+    const c = try parseCoverTarget("archive.ubuntu.com:443");
+    try std.testing.expectEqualStrings("archive.ubuntu.com", c.host);
+    try std.testing.expectEqual(@as(u16, 443), c.port);
+}
+
+test "parseCoverTarget: HOST only defaults to 443" {
+    const c = try parseCoverTarget("www.microsoft.com");
+    try std.testing.expectEqualStrings("www.microsoft.com", c.host);
+    try std.testing.expectEqual(@as(u16, 443), c.port);
 }
 
 fn parseListenSpec(spec: []const u8) !struct { []const u8, u16, std.Io.net.IpAddress } {

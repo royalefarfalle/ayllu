@@ -7,6 +7,7 @@ const pivot = @import("pivot.zig");
 const reality = @import("reality.zig");
 const tokens = @import("tokens.zig");
 const reverse_proxy = @import("reverse_proxy.zig");
+const rate_limit = @import("rate_limit.zig");
 
 pub const replay_cache_entries = 4096;
 pub const max_request_head_bytes = 8192;
@@ -30,17 +31,40 @@ pub const Config = struct {
     /// this host instead of sending a static 404. Gives active probes a
     /// byte-for-byte real response and burns fewer IPs.
     cover_target: ?reverse_proxy.CoverTarget = null,
+    /// Per-source admission-failure rate limit. Enabled by default so a
+    /// single adversary can't enumerate the short_id space for free.
+    rate_limit: rate_limit.Config = .{},
 };
 
 pub const State = struct {
     config: Config,
     mutex: std.Io.Mutex = .init,
     replay_cache: tokens.ReplayCache(replay_cache_entries) = .{},
+    limiter: ?rate_limit.RateLimiter = null,
+
+    pub fn initLimiter(self: *State, allocator: std.mem.Allocator) void {
+        self.limiter = rate_limit.RateLimiter.init(allocator, self.config.rate_limit);
+    }
+
+    pub fn deinitLimiter(self: *State) void {
+        if (self.limiter) |*l| l.deinit();
+        self.limiter = null;
+    }
 };
 
 pub fn sessionWithState(io: std.Io, client_socket: std.Io.net.Socket, state: *State) !void {
     const client_stream: std.Io.net.Stream = .{ .socket = client_socket };
     defer client_stream.close(io);
+
+    // Rate-limit check BEFORE any crypto. Silent-drop indistinguishable
+    // from a random TCP stall from the client's point of view.
+    const peer_key = peerPrefixFromSocket(client_socket);
+    if (state.limiter) |*l| {
+        state.mutex.lockUncancelable(io);
+        const verdict = l.consult(peer_key, nowUnixMs(io));
+        state.mutex.unlock(io);
+        if (verdict == .drop_silently) return;
+    }
 
     var rbuf: [max_request_head_bytes]u8 = undefined;
     var wbuf: [4096]u8 = undefined;
@@ -51,6 +75,7 @@ pub fn sessionWithState(io: std.Io, client_socket: std.Io.net.Socket, state: *St
     const head = takeRequestHeadWithDeadline(io, &reader.interface, state.config.pivot.max_request_bytes, admission_deadline) catch |err| switch (err) {
         error.EndOfStream, error.Timeout => return err,
         else => {
+            recordAdmissionFailure(state, peer_key, io);
             const partial = reader.interface.buffered();
             try serveFallback(io, state, partial, &reader.interface, &writer.interface, &client_stream);
             return;
@@ -66,6 +91,7 @@ pub fn sessionWithState(io: std.Io, client_socket: std.Io.net.Socket, state: *St
         &state.replay_cache,
     ) catch {
         state.mutex.unlock(io);
+        recordAdmissionFailure(state, peer_key, io);
         try serveFallback(io, state, head, &reader.interface, &writer.interface, &client_stream);
         return;
     };
@@ -73,9 +99,11 @@ pub fn sessionWithState(io: std.Io, client_socket: std.Io.net.Socket, state: *St
 
     switch (decision) {
         .fallback => {
+            recordAdmissionFailure(state, peer_key, io);
             try serveFallback(io, state, head, &reader.interface, &writer.interface, &client_stream);
         },
         .pivot => {
+            recordAdmissionSuccess(state, peer_key, io);
             try writer.interface.writeAll(
                 "HTTP/1.1 101 Switching Protocols\r\n" ++
                     "Connection: Upgrade\r\n" ++
@@ -177,6 +205,44 @@ fn serveFallback(
 
 fn nowUnixMs(io: std.Io) i64 {
     return @intCast(@divFloor(std.Io.Clock.real.now(io).nanoseconds, 1_000_000));
+}
+
+fn recordAdmissionFailure(state: *State, key: rate_limit.PrefixKey, io: std.Io) void {
+    if (state.limiter) |*l| {
+        state.mutex.lockUncancelable(io);
+        l.recordFailure(key, nowUnixMs(io));
+        state.mutex.unlock(io);
+    }
+}
+
+fn recordAdmissionSuccess(state: *State, key: rate_limit.PrefixKey, io: std.Io) void {
+    if (state.limiter) |*l| {
+        state.mutex.lockUncancelable(io);
+        l.recordSuccess(key, nowUnixMs(io));
+        state.mutex.unlock(io);
+    }
+}
+
+/// Extract a /24 or /64 prefix for the peer from a connected socket handle.
+/// On failure (unsupported address family, syscall error) returns the zero
+/// prefix — all anonymous peers then share one bucket, which is still
+/// enough to rate-limit an adversary probing without a stable source IP.
+fn peerPrefixFromSocket(socket: std.Io.net.Socket) rate_limit.PrefixKey {
+    var addr: std.posix.sockaddr.storage = undefined;
+    var addrlen: std.posix.socklen_t = @sizeOf(std.posix.sockaddr.storage);
+    std.posix.getpeername(socket.handle, @ptrCast(&addr), &addrlen) catch return rate_limit.ipv4_zero_prefix;
+    switch (addr.family) {
+        std.posix.AF.INET => {
+            const sin: *const std.posix.sockaddr.in = @ptrCast(@alignCast(&addr));
+            const raw = std.mem.asBytes(&sin.addr)[0..4].*;
+            return rate_limit.prefixFromIpv4(raw);
+        },
+        std.posix.AF.INET6 => {
+            const sin6: *const std.posix.sockaddr.in6 = @ptrCast(@alignCast(&addr));
+            return rate_limit.prefixFromIpv6(sin6.addr);
+        },
+        else => return rate_limit.ipv4_zero_prefix,
+    }
 }
 
 fn echoOnce(io: std.Io, server: *std.Io.net.Server, expected_len: usize) anyerror!void {
@@ -315,6 +381,88 @@ test "sessionWithState reverse-proxies to cover host on admission fallback" {
     client_open = false;
     try cover_task.await(io);
     try camo_task.await(io);
+}
+
+test "rate limiter silences the source after repeated admission failures" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var camo = try (@as(std.Io.net.IpAddress, .{
+        .ip4 = std.Io.net.Ip4Address.loopback(0),
+    })).listen(io, .{ .reuse_address = true });
+    defer camo.deinit(io);
+
+    var state: State = .{
+        .config = .{
+            .pivot = .{
+                .reality = .{
+                    .target = .{ .host = "example.com", .port = 443 },
+                    .server_names = &.{"example.com"},
+                    .private_key = hex32("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+                    .short_ids = &[_]reality.ShortId{try reality.parseShortId("aabb")},
+                },
+            },
+            .rate_limit = .{
+                .failures_per_window = 2,
+                .window_ms = 60_000,
+                .silent_duration_ms = 60_000,
+            },
+        },
+    };
+    state.initLimiter(std.testing.allocator);
+    defer state.deinitLimiter();
+
+    const camo_port = camo.socket.address.getPort();
+
+    // Fire enough failed admissions to trip the limiter: 2 failures (under
+    // failures_per_window=2) flips the /24 into silent-drop for 60s.
+    var i: usize = 0;
+    while (i < 3) : (i += 1) {
+        var session_task = io.async(acceptOneSession, .{ io, &camo, &state });
+        errdefer session_task.cancel(io) catch {};
+
+        const client = try (@as(std.Io.net.IpAddress, .{
+            .ip4 = std.Io.net.Ip4Address.loopback(camo_port),
+        })).connect(io, .{ .mode = .stream });
+        var client_open = true;
+        defer if (client_open) client.close(io);
+
+        var cr_buf: [128]u8 = undefined;
+        var cw_buf: [128]u8 = undefined;
+        var reader = std.Io.net.Stream.Reader.init(client, io, &cr_buf);
+        var writer = std.Io.net.Stream.Writer.init(client, io, &cw_buf);
+
+        // Probe with no admission token => classify .fallback => records failure.
+        writer.interface.writeAll("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n") catch {};
+        writer.interface.flush() catch {};
+
+        // Read whatever the server gives us (fallback body or silent EOF).
+        var scratch: [64]u8 = undefined;
+        const n = reader.interface.readVec(@constCast(&[_][]u8{&scratch})) catch 0;
+        _ = n;
+        client.close(io);
+        client_open = false;
+        session_task.await(io) catch {};
+    }
+
+    // Next connection should be silent-dropped: limiter consult returns
+    // .drop_silently before any reads; server closes the socket with no
+    // response.
+    var final_task = io.async(acceptOneSession, .{ io, &camo, &state });
+    errdefer final_task.cancel(io) catch {};
+    const final_client = try (@as(std.Io.net.IpAddress, .{
+        .ip4 = std.Io.net.Ip4Address.loopback(camo_port),
+    })).connect(io, .{ .mode = .stream });
+    defer final_client.close(io);
+
+    var cr_buf: [64]u8 = undefined;
+    var reader = std.Io.net.Stream.Reader.init(final_client, io, &cr_buf);
+
+    // Silent drop manifests as an immediate EOF from the server side.
+    const peek_result = reader.interface.peek(1);
+    try std.testing.expectError(error.EndOfStream, peek_result);
+    try final_task.await(io);
 }
 
 test "sessionWithState pivots then serves inner SOCKS over the same socket" {
