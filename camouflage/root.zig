@@ -5,6 +5,7 @@ pub const tokens = @import("tokens.zig");
 pub const pivot = @import("pivot.zig");
 pub const reverse_proxy = @import("reverse_proxy.zig");
 pub const rate_limit = @import("rate_limit.zig");
+pub const cover_pool = @import("cover_pool.zig");
 pub const server = @import("server.zig");
 pub const client = @import("client.zig");
 
@@ -14,6 +15,7 @@ test {
     _ = pivot;
     _ = reverse_proxy;
     _ = rate_limit;
+    _ = cover_pool;
     _ = server;
     _ = client;
 }

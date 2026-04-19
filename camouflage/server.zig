@@ -8,6 +8,7 @@ const reality = @import("reality.zig");
 const tokens = @import("tokens.zig");
 const reverse_proxy = @import("reverse_proxy.zig");
 const rate_limit = @import("rate_limit.zig");
+const cover_pool = @import("cover_pool.zig");
 
 pub const replay_cache_entries = 4096;
 pub const max_request_head_bytes = 8192;
@@ -28,9 +29,13 @@ pub const Config = struct {
     fallback: FallbackResponse = .{},
     /// Optional cover-site reverse proxy: when admission fails (probe,
     /// non-SOCKS bytes, wrong token), we TCP-passthrough the session to
-    /// this host instead of sending a static 404. Gives active probes a
-    /// byte-for-byte real response and burns fewer IPs.
+    /// one of these hosts (weighted rotation per-session). Gives active
+    /// probes a byte-for-byte real response and burns fewer IPs.
     cover_target: ?reverse_proxy.CoverTarget = null,
+    /// Optional weighted pool of cover hosts. When set, takes precedence
+    /// over `cover_target`. Entries are picked via std.Io.random per
+    /// session.
+    cover_pool: cover_pool.Pool = cover_pool.Pool.init(&.{}),
     /// Per-source admission-failure rate limit. Enabled by default so a
     /// single adversary can't enumerate the short_id space for free.
     rate_limit: rate_limit.Config = .{},
@@ -183,7 +188,13 @@ fn serveFallback(
     writer_iface: *std.Io.Writer,
     client_stream: *const std.Io.net.Stream,
 ) !void {
-    if (state.config.cover_target) |cover| {
+    // Prefer the weighted pool; fall back to the single cover_target; then
+    // to the static 404.
+    const chosen: ?reverse_proxy.CoverTarget = blk: {
+        if (state.config.cover_pool.pickRandom(io)) |t| break :blk t;
+        break :blk state.config.cover_target;
+    };
+    if (chosen) |cover| {
         const cover_deadline = proxy.timeouts.deadlineFromNowMs(io, proxy.timeouts.Defaults.upstream_connect_ms);
         reverse_proxy.forwardBuffered(
             io,

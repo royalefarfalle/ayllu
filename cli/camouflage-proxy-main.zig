@@ -23,6 +23,7 @@ pub fn main(init: std.process.Init) !void {
     var server_names = std.ArrayList([]const u8).empty;
     var short_ids = std.ArrayList(ayllu_camouflage.reality.ShortId).empty;
     var cover_target: ?ayllu_camouflage.reverse_proxy.CoverTarget = null;
+    var pool_entries = std.ArrayList(ayllu_camouflage.cover_pool.WeightedCover).empty;
     var rate_limit_cfg: ayllu_camouflage.rate_limit.Config = .{};
 
     var i: usize = 1;
@@ -82,6 +83,10 @@ pub fn main(init: std.process.Init) !void {
             i += 1;
             if (i >= args.len) return error.MissingCoverTargetValue;
             cover_target = try parseCoverTarget(args[i]);
+        } else if (std.mem.eql(u8, args[i], "--cover-site")) {
+            i += 1;
+            if (i >= args.len) return error.MissingCoverSiteValue;
+            try pool_entries.append(gpa, try parseCoverSite(args[i]));
         } else if (std.mem.eql(u8, args[i], "--admission-fail-threshold")) {
             i += 1;
             if (i >= args.len) return error.MissingAdmissionFailThresholdValue;
@@ -122,6 +127,7 @@ pub fn main(init: std.process.Init) !void {
             },
             .proxy = proxy_config,
             .cover_target = cover_target,
+            .cover_pool = ayllu_camouflage.cover_pool.Pool.init(pool_entries.items),
             .rate_limit = rate_limit_cfg,
         },
     };
@@ -180,8 +186,10 @@ fn printUsage(io: std.Io) !void {
         \\  --token-max-future-slots N accepted future slots (default 1)
         \\  --min-client-ver X.Y.Z     minimum client version
         \\  --max-client-ver X.Y.Z     maximum client version
-        \\  --cover-target HOST:PORT   honest reverse-proxy destination for
-        \\                             failed admissions (default: static 404)
+        \\  --cover-target HOST:PORT   single honest reverse-proxy destination
+        \\                             for failed admissions (default: static 404)
+        \\  --cover-site  HOST:PORT[:W] add to weighted cover pool (repeatable);
+        \\                             pool takes precedence over --cover-target
         \\  --admission-fail-threshold N  failures/window before silent-drop
         \\                             (default 20)
         \\  --admission-window-ms N    window length for failure count
@@ -199,6 +207,39 @@ fn parseCoverTarget(spec: []const u8) !ayllu_camouflage.reverse_proxy.CoverTarge
         return .{ .host = spec, .port = 443 };
     const port = std.fmt.parseInt(u16, spec[colon + 1 ..], 10) catch return error.BadCoverTargetValue;
     return .{ .host = spec[0..colon], .port = port };
+}
+
+/// Parses "HOST", "HOST:PORT", or "HOST:PORT:WEIGHT" for the cover pool.
+fn parseCoverSite(spec: []const u8) !ayllu_camouflage.cover_pool.WeightedCover {
+    // Split on ':' with at most 2 splits to support HOST:PORT:WEIGHT.
+    var host: []const u8 = spec;
+    var port: u16 = 443;
+    var weight: u32 = 1;
+
+    const first = std.mem.indexOfScalar(u8, spec, ':') orelse
+        return .{ .target = .{ .host = spec, .port = 443 }, .weight = 1 };
+    host = spec[0..first];
+    const after = spec[first + 1 ..];
+    const second = std.mem.indexOfScalar(u8, after, ':');
+    if (second) |k| {
+        port = std.fmt.parseInt(u16, after[0..k], 10) catch return error.BadCoverSiteValue;
+        weight = std.fmt.parseInt(u32, after[k + 1 ..], 10) catch return error.BadCoverSiteValue;
+    } else {
+        port = std.fmt.parseInt(u16, after, 10) catch return error.BadCoverSiteValue;
+    }
+    return .{ .target = .{ .host = host, .port = port }, .weight = weight };
+}
+
+test "parseCoverSite: HOST:PORT:WEIGHT" {
+    const c = try parseCoverSite("archive.ubuntu.com:443:3");
+    try std.testing.expectEqualStrings("archive.ubuntu.com", c.target.host);
+    try std.testing.expectEqual(@as(u16, 443), c.target.port);
+    try std.testing.expectEqual(@as(u32, 3), c.weight);
+}
+
+test "parseCoverSite: HOST:PORT defaults weight=1" {
+    const c = try parseCoverSite("www.debian.org:443");
+    try std.testing.expectEqual(@as(u32, 1), c.weight);
 }
 
 test "parseCoverTarget: HOST:PORT" {
