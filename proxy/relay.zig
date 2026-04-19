@@ -8,9 +8,17 @@ pub const PipeError = std.Io.Reader.StreamRemainingError || std.Io.Writer.Error;
 /// Качает всё, что может прочитать src, в dst до EOF, затем флашит dst.
 /// Возвращает число прокачанных байт.
 pub fn pipeAll(src: *std.Io.Reader, dst: *std.Io.Writer) PipeError!usize {
-    const n = try src.streamRemaining(dst);
+    var total: usize = 0;
+    while (true) {
+        const n = src.stream(dst, .unlimited) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => |e| return e,
+        };
+        total += n;
+        try dst.flush();
+    }
     try dst.flush();
-    return n;
+    return total;
 }
 
 pub const Stream = struct {
