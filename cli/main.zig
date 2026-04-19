@@ -9,11 +9,10 @@ pub fn main(init: std.process.Init) !void {
     var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
     const out = &stdout_file_writer.interface;
 
-    try out.print("ayllu {s} — phase {d}\n", .{ ayllu.version, ayllu.phase });
+    try out.print("ayllu phase {d}\n", .{ayllu.phase});
     try out.flush();
 }
 
 test "cli links against ayllu module" {
     try std.testing.expect(ayllu.phase >= 1);
-    try std.testing.expectEqualStrings("0.0.1", ayllu.version);
 }
