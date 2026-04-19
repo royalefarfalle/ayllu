@@ -16,6 +16,13 @@ pub const Target = struct {
     port: u16,
 };
 
+pub const PublicConfig = struct {
+    target: Target,
+    server_public_key: [key_length]u8,
+    min_client_version: ?std.SemanticVersion = null,
+    max_client_version: ?std.SemanticVersion = null,
+};
+
 pub const ShortId = struct {
     bytes: [max_short_id_length]u8 = @splat(0),
     len: u8 = 0,
@@ -58,6 +65,15 @@ pub const Config = struct {
 
     pub fn publicKey(self: Config) ![key_length]u8 {
         return ayllu.crypto.X25519.recoverPublicKey(self.private_key);
+    }
+
+    pub fn exportPublic(self: Config) !PublicConfig {
+        return .{
+            .target = self.target,
+            .server_public_key = try self.publicKey(),
+            .min_client_version = self.min_client_version,
+            .max_client_version = self.max_client_version,
+        };
     }
 };
 
@@ -186,20 +202,22 @@ pub fn authorize(config: Config, hello: Hello, now_ms: i64) AuthorizeError!Sessi
     }
 
     const shared_secret = try ayllu.crypto.X25519.scalarmult(config.private_key, hello.client_public_key);
-    const digest = transcriptDigest(config, hello);
-    const prk = std.crypto.kdf.hkdf.HkdfSha256.extract(&digest, &shared_secret);
+    return deriveMaterial(config.target, config.min_client_version, config.max_client_version, hello, shared_secret);
+}
 
-    var auth_key: [32]u8 = undefined;
-    std.crypto.kdf.hkdf.HkdfSha256.expand(&auth_key, "ayllu.reality.v1.auth", prk);
-
-    var response_seed: [32]u8 = undefined;
-    std.crypto.kdf.hkdf.HkdfSha256.expand(&response_seed, "ayllu.reality.v1.response", prk);
-
-    return .{
-        .shared_secret = shared_secret,
-        .auth_key = auth_key,
-        .response_seed = response_seed,
-    };
+pub fn deriveClientMaterial(
+    public_config: PublicConfig,
+    client_private_key: [key_length]u8,
+    hello: Hello,
+) !SessionMaterial {
+    const shared_secret = try ayllu.crypto.X25519.scalarmult(client_private_key, public_config.server_public_key);
+    return deriveMaterial(
+        public_config.target,
+        public_config.min_client_version,
+        public_config.max_client_version,
+        hello,
+        shared_secret,
+    );
 }
 
 fn containsServerName(server_names: []const []const u8, candidate: []const u8) bool {
@@ -242,27 +260,55 @@ fn validateLabel(label: []const u8) ValidateError!void {
     if (label[0] == '-' or label[label.len - 1] == '-') return error.InvalidServerName;
 }
 
-fn transcriptDigest(config: Config, hello: Hello) [32]u8 {
+fn transcriptDigest(
+    target: Target,
+    min_client_version: ?std.SemanticVersion,
+    max_client_version: ?std.SemanticVersion,
+    hello: Hello,
+) [32]u8 {
     var hash = ayllu.crypto.Sha256.init(.{});
     hash.update("ayllu.reality.v1");
-    hash.update(config.target.host);
+    hash.update(target.host);
     hash.update(hello.server_name);
     hash.update(hello.short_id.slice());
     hash.update(&hello.client_public_key);
 
     var int_buf: [8]u8 = undefined;
-    std.mem.writeInt(u16, int_buf[0..2], config.target.port, .big);
+    std.mem.writeInt(u16, int_buf[0..2], target.port, .big);
     hash.update(int_buf[0..2]);
     std.mem.writeInt(i64, &int_buf, hello.unix_ms, .big);
     hash.update(&int_buf);
 
-    updateOptionalVersion(&hash, config.min_client_version);
-    updateOptionalVersion(&hash, config.max_client_version);
+    updateOptionalVersion(&hash, min_client_version);
+    updateOptionalVersion(&hash, max_client_version);
     updateOptionalVersion(&hash, hello.client_version);
 
     var out: [32]u8 = undefined;
     hash.final(&out);
     return out;
+}
+
+fn deriveMaterial(
+    target: Target,
+    min_client_version: ?std.SemanticVersion,
+    max_client_version: ?std.SemanticVersion,
+    hello: Hello,
+    shared_secret: [ayllu.crypto.X25519.shared_length]u8,
+) SessionMaterial {
+    const digest = transcriptDigest(target, min_client_version, max_client_version, hello);
+    const prk = std.crypto.kdf.hkdf.HkdfSha256.extract(&digest, &shared_secret);
+
+    var auth_key: [32]u8 = undefined;
+    std.crypto.kdf.hkdf.HkdfSha256.expand(&auth_key, "ayllu.reality.v1.auth", prk);
+
+    var response_seed: [32]u8 = undefined;
+    std.crypto.kdf.hkdf.HkdfSha256.expand(&response_seed, "ayllu.reality.v1.response", prk);
+
+    return .{
+        .shared_secret = shared_secret,
+        .auth_key = auth_key,
+        .response_seed = response_seed,
+    };
 }
 
 fn updateOptionalVersion(hash: *ayllu.crypto.Sha256, version: ?std.SemanticVersion) void {
@@ -428,4 +474,28 @@ test "authorize rejects server name, short id, version and stale time" {
         .client_version = try std.SemanticVersion.parse("1.5.0"),
         .unix_ms = 1_000,
     }, 4_500));
+}
+
+test "client and server derive identical session material" {
+    const server_cfg: Config = .{
+        .target = .{ .host = "example.com", .port = 443 },
+        .server_names = &.{"example.com"},
+        .private_key = hex32("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+        .min_client_version = try std.SemanticVersion.parse("1.0.0"),
+        .max_client_version = try std.SemanticVersion.parse("2.0.0"),
+        .short_ids = &[_]ShortId{try parseShortId("aabb")},
+    };
+    const public_cfg = try server_cfg.exportPublic();
+    const client_private = hex32("2122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f40");
+    const hello: Hello = .{
+        .server_name = "example.com",
+        .short_id = try parseShortId("aabb"),
+        .client_public_key = try ayllu.crypto.X25519.recoverPublicKey(client_private),
+        .client_version = try std.SemanticVersion.parse("1.5.0"),
+        .unix_ms = 1_710_000_000_000,
+    };
+
+    const server_material = try authorize(server_cfg, hello, hello.unix_ms);
+    const client_material = try deriveClientMaterial(public_cfg, client_private, hello);
+    try std.testing.expectEqualDeep(server_material, client_material);
 }

@@ -204,28 +204,20 @@ pub fn session(io: std.Io, client_socket: std.Io.net.Socket) !void {
     return sessionWithConfig(io, client_socket, .{});
 }
 
-pub fn sessionWithConfig(io: std.Io, client_socket: std.Io.net.Socket, config: Config) !void {
-    const client_stream: std.Io.net.Stream = .{ .socket = client_socket };
-    defer client_stream.close(io);
-
-    var cr_buf: [4096]u8 = undefined;
-    var cw_buf: [4096]u8 = undefined;
-    var client_reader = std.Io.net.Stream.Reader.init(client_stream, io, &cr_buf);
-    var client_writer = std.Io.net.Stream.Writer.init(client_stream, io, &cw_buf);
-
-    negotiateMethod(&client_reader.interface, &client_writer.interface, config) catch |err| switch (err) {
+pub fn sessionOnPreparedStream(io: std.Io, client: relay.Stream, config: Config) !void {
+    negotiateMethod(client.reader, client.writer, config) catch |err| switch (err) {
         error.CredentialsRejected => return err,
         error.NoAcceptableMethods => return err,
         else => return err,
     };
 
-    const req = readRequest(&client_reader.interface) catch |err| {
-        sendReply(&client_writer.interface, errorToReply(err), socks5.zero_ipv4, 0) catch {};
+    const req = readRequest(client.reader) catch |err| {
+        sendReply(client.writer, errorToReply(err), socks5.zero_ipv4, 0) catch {};
         return err;
     };
 
     if (req.command != .connect) {
-        try sendReply(&client_writer.interface, .command_not_supported, socks5.zero_ipv4, 0);
+        try sendReply(client.writer, .command_not_supported, socks5.zero_ipv4, 0);
         return error.UnsupportedCommand;
     }
 
@@ -236,12 +228,12 @@ pub fn sessionWithConfig(io: std.Io, client_socket: std.Io.net.Socket, config: C
             .network_unreachable
         else
             .host_unreachable;
-        try sendReply(&client_writer.interface, reply, socks5.zero_ipv4, 0);
+        try sendReply(client.writer, reply, socks5.zero_ipv4, 0);
         return err;
     };
     defer upstream_stream.close(io);
 
-    try sendReply(&client_writer.interface, .succeeded, socks5.zero_ipv4, 0);
+    try sendReply(client.writer, .succeeded, socks5.zero_ipv4, 0);
 
     var ur_buf: [4096]u8 = undefined;
     var uw_buf: [4096]u8 = undefined;
@@ -250,17 +242,28 @@ pub fn sessionWithConfig(io: std.Io, client_socket: std.Io.net.Socket, config: C
 
     try relay.bidirectional(
         io,
-        .{
-            .reader = &client_reader.interface,
-            .writer = &client_writer.interface,
-            .net_stream = &client_stream,
-        },
+        client,
         .{
             .reader = &upstream_reader.interface,
             .writer = &upstream_writer.interface,
             .net_stream = &upstream_stream,
         },
     );
+}
+
+pub fn sessionWithConfig(io: std.Io, client_socket: std.Io.net.Socket, config: Config) !void {
+    const client_stream: std.Io.net.Stream = .{ .socket = client_socket };
+    defer client_stream.close(io);
+
+    var cr_buf: [4096]u8 = undefined;
+    var cw_buf: [4096]u8 = undefined;
+    var client_reader = std.Io.net.Stream.Reader.init(client_stream, io, &cr_buf);
+    var client_writer = std.Io.net.Stream.Writer.init(client_stream, io, &cw_buf);
+    try sessionOnPreparedStream(io, .{
+        .reader = &client_reader.interface,
+        .writer = &client_writer.interface,
+        .net_stream = &client_stream,
+    }, config);
 }
 
 test "handshake happy path: no-auth greeting + CONNECT IPv4" {
