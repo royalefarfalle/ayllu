@@ -40,6 +40,9 @@ pub const InMemoryTransport = struct {
     inbox: std.Deque(Envelope) = .empty,
     consumed_payloads: std.ArrayList([]u8) = .empty,
 
+    /// Frees the queued inbox AND all already-recv'd payload buffers. Any
+    /// `Envelope` previously returned by `recv` has its `.payload` slice
+    /// invalidated — callers must finish with those envelopes before deinit.
     pub fn deinit(self: *InMemoryTransport) void {
         while (self.inbox.popFront()) |env| self.allocator.free(@constCast(env.payload));
         self.inbox.deinit(self.allocator);
@@ -156,4 +159,101 @@ test "InMemoryTransport: send copies payload — overwriting source after send i
     @memset(&payload_buf, 'X');
     const got = (try t.transport().recv()).?;
     try std.testing.expectEqualStrings("original", got.payload);
+}
+
+test "InMemoryTransport: same envelope sent twice produces two independent inbox entries" {
+    var t: InMemoryTransport = .{ .allocator = std.testing.allocator };
+    defer t.deinit();
+    const alice = try Identity.fromSeed(@splat(0x46));
+    const env = try envelope_mod.buildAndSign(std.testing.io, alice, .broadcast, 0, 1, "twice");
+    const tr = t.transport();
+    try tr.send(&env);
+    try tr.send(&env);
+    try std.testing.expectEqual(@as(usize, 2), t.inbox.len);
+    const r1 = (try tr.recv()).?;
+    const r2 = (try tr.recv()).?;
+    try std.testing.expect(r1.payload.ptr != r2.payload.ptr);
+    try std.testing.expectEqualStrings("twice", r1.payload);
+    try std.testing.expectEqualStrings("twice", r2.payload);
+}
+
+test "InMemoryTransport: recv preserves every envelope field" {
+    var t: InMemoryTransport = .{ .allocator = std.testing.allocator };
+    defer t.deinit();
+    const alice = try Identity.fromSeed(@splat(0x47));
+    const env = try envelope_mod.buildAndSign(
+        std.testing.io,
+        alice,
+        .{ .fingerprint = @splat(0xF1) },
+        1_700,
+        1_800,
+        "fields",
+    );
+    try t.transport().send(&env);
+    const got = (try t.transport().recv()).?;
+    try std.testing.expectEqual(env.version, got.version);
+    try std.testing.expectEqualSlices(u8, &env.id, &got.id);
+    try std.testing.expectEqualSlices(u8, &env.from, &got.from);
+    try std.testing.expectEqual(env.created_at, got.created_at);
+    try std.testing.expectEqual(env.expires_at, got.expires_at);
+    try std.testing.expectEqualSlices(u8, &env.signature.toBytes(), &got.signature.toBytes());
+    try std.testing.expect(std.meta.activeTag(got.to) == .fingerprint);
+    try std.testing.expectEqualSlices(u8, &env.to.fingerprint, &got.to.fingerprint);
+}
+
+test "InMemoryTransport: deinit drops un-recv'd envelopes without leaking" {
+    var t: InMemoryTransport = .{ .allocator = std.testing.allocator };
+    const alice = try Identity.fromSeed(@splat(0x48));
+    const e1 = try envelope_mod.buildAndSign(std.testing.io, alice, .broadcast, 0, 1, "a");
+    const e2 = try envelope_mod.buildAndSign(std.testing.io, alice, .broadcast, 0, 1, "b");
+    const e3 = try envelope_mod.buildAndSign(std.testing.io, alice, .broadcast, 0, 1, "c");
+    try t.transport().send(&e1);
+    try t.transport().send(&e2);
+    try t.transport().send(&e3);
+    t.deinit(); // testing.allocator will report on any leak
+}
+
+test "InMemoryTransport: deinit after partial recv frees both inbox and consumed" {
+    var t: InMemoryTransport = .{ .allocator = std.testing.allocator };
+    const alice = try Identity.fromSeed(@splat(0x49));
+    const e1 = try envelope_mod.buildAndSign(std.testing.io, alice, .broadcast, 0, 1, "a");
+    const e2 = try envelope_mod.buildAndSign(std.testing.io, alice, .broadcast, 0, 1, "b");
+    const e3 = try envelope_mod.buildAndSign(std.testing.io, alice, .broadcast, 0, 1, "c");
+    try t.transport().send(&e1);
+    try t.transport().send(&e2);
+    try t.transport().send(&e3);
+    _ = try t.transport().recv();
+    t.deinit();
+}
+
+test "InMemoryTransport: empty payload roundtrip" {
+    var t: InMemoryTransport = .{ .allocator = std.testing.allocator };
+    defer t.deinit();
+    const alice = try Identity.fromSeed(@splat(0x4A));
+    const env = try envelope_mod.buildAndSign(std.testing.io, alice, .broadcast, 0, 1, "");
+    try t.transport().send(&env);
+    const got = (try t.transport().recv()).?;
+    try std.testing.expectEqual(@as(usize, 0), got.payload.len);
+    try got.verify(alice.publicView());
+}
+
+test "InMemoryTransport: two instances do not share inbox" {
+    var a: InMemoryTransport = .{ .allocator = std.testing.allocator };
+    defer a.deinit();
+    var b: InMemoryTransport = .{ .allocator = std.testing.allocator };
+    defer b.deinit();
+    const alice = try Identity.fromSeed(@splat(0x4B));
+    const env = try envelope_mod.buildAndSign(std.testing.io, alice, .broadcast, 0, 1, "to-a");
+    try a.transport().send(&env);
+    try std.testing.expectEqual(@as(?Envelope, null), try b.transport().recv());
+}
+
+test "InMemoryTransport: send propagates OOM from inbox growth without leaking duped payload" {
+    var fa = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    var t: InMemoryTransport = .{ .allocator = fa.allocator() };
+    defer t.deinit();
+    const alice = try Identity.fromSeed(@splat(0x4C));
+    const env = try envelope_mod.buildAndSign(std.testing.io, alice, .broadcast, 0, 1, "oom");
+    try std.testing.expectError(error.OutOfMemory, t.transport().send(&env));
+    try std.testing.expectEqual(@as(usize, 0), t.inbox.len);
 }

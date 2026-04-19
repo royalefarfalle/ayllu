@@ -33,3 +33,13 @@ test "ayllu public surface exposes envelope.buildAndSign" {
     const env = try ayllu.envelope.buildAndSign(std.testing.io, id, .broadcast, 0, 1, "p");
     try env.verify(id.publicView());
 }
+
+test "ayllu public surface: end-to-end send + recv + verify via transport" {
+    var t: ayllu.transport.InMemoryTransport = .{ .allocator = std.testing.allocator };
+    defer t.deinit();
+    const id = try ayllu.identity.Identity.fromSeed(@splat(0));
+    const env = try ayllu.envelope.buildAndSign(std.testing.io, id, .broadcast, 0, 1, "end2end");
+    try t.transport().send(&env);
+    const got = (try t.transport().recv()).?;
+    try got.verify(id.publicView());
+}
