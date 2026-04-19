@@ -29,24 +29,40 @@ Requires Zig **0.16.0** or newer. Prefer `-Doptimize=ReleaseFast` for production
 - `core/transport` — vtable-based interface + `InMemoryTransport` loopback.
 - `core/registry` — OR-Set CRDT for group membership.
 
-**Phase-3 SOCKS5 proxy** (MVP):
+**Phase-3 SOCKS5 proxy**:
 
-- `proxy/socks5` — RFC 1928 parser/encoder.
-- `proxy/relay` — bidirectional TCP copy through `std.Io`.
-- `proxy/daemon` — handshake + upstream connect (including DNS via `std.Io.net.HostName.connect`).
-- `ayllu-proxy` binary — accepts connections via an accept loop on `std.Io.Threaded`.
+- `proxy/socks5` — RFC 1928 parser/encoder with golden vectors.
+- `proxy/auth` — RFC 1929 username/password auth, constant-time compare.
+- `proxy/relay` — bidirectional TCP copy through `std.Io`; `bidirectionalWithDeadline` for absolute session caps.
+- `proxy/timeouts` — `std.Io.Timeout`/`Select`-based wrappers for handshake read, upstream connect, and relay deadlines.
+- `proxy/daemon` — handshake + upstream connect (DNS via `std.Io.net.HostName.connect`); full session wrapped in a handshake-level deadline.
+- `ayllu-proxy` binary — accept loop on `std.Io.Threaded`.
 
-Verified end-to-end: `curl` through `socks5h://localhost:PORT` fetches HTTPS (ziglang.org), with domain names resolved on the proxy side (ATYP=domain).
+Verified end-to-end: `curl` through `socks5h://localhost:PORT` fetches HTTPS with domain names resolved on the proxy side.
 
-## Example VPS deployment
+**Phase-4 camouflage** (production hardening landed; full REALITY TLS wire-compat is next):
 
-The deployment below targets a single operator running one VPS to serve a small trusted group (typically a handful of SOCKS5-capable clients such as Telegram). It is not a multi-tenant service.
+- `camouflage/reality` — X25519 admission + HMAC-SHA256 auth material.
+- `camouflage/tokens` — time-keyed HMAC handshake tokens + replay cache.
+- `camouflage/pivot` — HTTP-like admission parser + classify (fallback/pivot).
+- `camouflage/reverse_proxy` — honest TCP-passthrough to a real cover host when admission fails; buffered head replayed so an active probe gets byte-for-byte what the cover site returned.
+- `camouflage/cover_pool` — weighted multi-site cover rotation (per-connection pick).
+- `camouflage/rate_limit` — per-/24 admission-failure token bucket; trips into silent-drop mode so short_id can't be enumerated for free.
+- `camouflage/metrics` — Prometheus-style counter registry + `/metrics` HTTP endpoint on a separate listener.
+- `camouflage/server` + `camouflage/client` — gateway (outer admission → inner SOCKS5) and local bridge (local SOCKS5 → remote admission → pivot).
+- Binaries: `ayllu-camouflage-proxy`, `ayllu-camouflage-client`, `ayllu-reality-keygen`.
+
+`zig build test --summary all`: 193/193 passing.
+
+## VPS deployment
+
+The deployment below is for a single operator running one VPS to serve a small trusted group of SOCKS5-capable clients (Telegram, qBittorrent, curl, any other app with a SOCKS5 setting). It is not a multi-tenant service.
 
 ### 1. Provision a VPS
 
-Prefer a jurisdiction whose network path is outside the censor's DPI (commonly the Netherlands, Finland, or Estonia for European users). Minimum 1 CPU / 1 GB RAM. Use a clean IP that is not already in known block lists — verify via `bgp.tools` or equivalent.
+Pick a jurisdiction whose network path is outside the censor's DPI (common European picks: Netherlands, Finland, Estonia). Minimum 1 CPU / 1 GB RAM. Use a clean IP that is not already in known block lists — verify via `bgp.tools` or equivalent.
 
-### 2. Build the binary
+### 2. Build the binaries
 
 ```sh
 # on the VPS (Linux)
@@ -56,85 +72,108 @@ export PATH="$PWD/zig-x86_64-linux-0.16.0:$PATH"
 
 git clone <url> ayllu && cd ayllu
 zig build -Doptimize=ReleaseFast
-# produces zig-out/bin/ayllu-proxy (~500 KB)
+sudo install -m 755 zig-out/bin/ayllu-camouflage-proxy /usr/local/bin/
+sudo install -m 755 zig-out/bin/ayllu-reality-keygen   /usr/local/bin/
 ```
 
-### 3. Systemd unit (`/etc/systemd/system/ayllu-proxy.service`)
-
-```ini
-[Unit]
-Description=Ayllu SOCKS5 proxy
-After=network-online.target
-
-[Service]
-Type=simple
-User=ayllu
-ExecStart=/usr/local/bin/ayllu-proxy --listen 0.0.0.0:443
-Restart=on-failure
-RestartSec=3
-
-# sandbox
-NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=yes
-PrivateTmp=yes
-
-[Install]
-WantedBy=multi-user.target
-```
-
-**Port 443** blends best with ambient HTTPS traffic seen from outside. If the VPS already serves an HTTPS site, either use a different port (e.g. 8443) or run an nginx-stream SNI splitter in front.
+### 3. Generate REALITY keys + cover pool + auth file
 
 ```sh
 sudo useradd -r -s /usr/sbin/nologin ayllu
-sudo install -m 755 zig-out/bin/ayllu-proxy /usr/local/bin/
-sudo systemctl daemon-reload
-sudo systemctl enable --now ayllu-proxy
+sudo mkdir -p /etc/ayllu
+sudo chown root:ayllu /etc/ayllu && sudo chmod 750 /etc/ayllu
+
+# REALITY keypair + short_id (save the public key somewhere the client can read it).
+ayllu-reality-keygen | sudo tee /etc/ayllu/reality.txt
+
+# Per-user credentials. One `username:password` per file.
+sudo tee /etc/ayllu/credentials <<< 'alice:strongish-password'
+sudo chown root:ayllu /etc/ayllu/credentials
+sudo chmod 640 /etc/ayllu/credentials
+
+# Copy the service environment template and fill in.
+sudo cp deploy/camouflage.env.example /etc/ayllu/camouflage.env
+sudo chown root:ayllu /etc/ayllu/camouflage.env
+sudo chmod 640 /etc/ayllu/camouflage.env
+sudoedit /etc/ayllu/camouflage.env   # paste AYLLU_PRIVATE_KEY + AYLLU_SHORT_ID
 ```
 
-### 4. Firewall — mandatory
-
-Without authentication anyone on the internet can relay traffic through your VPS (proxy-abuse puts your IP on spam lists). Restrict access to the static IPs of your intended clients:
+### 4. Install the systemd unit
 
 ```sh
-# ufw example
+sudo cp deploy/ayllu-camouflage-proxy.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now ayllu-camouflage-proxy
+sudo journalctl -u ayllu-camouflage-proxy -f
+```
+
+The shipped unit already:
+
+- Binds `${AYLLU_LISTEN}` (default `0.0.0.0:443`).
+- Ships a weighted cover pool (Ubuntu/Debian/Microsoft mirrors) for the honest-fallback reverse proxy.
+- Enforces the admission failure rate limit (20 failures / 60 s → 5 min silent drop).
+- Requires `--auth-file /etc/ayllu/credentials`.
+- Runs under systemd sandbox hardening (`NoNewPrivileges`, `ProtectSystem=strict`, `RestrictAddressFamilies`, `SystemCallFilter=@system-service`, `MemoryDenyWriteExecute`, …).
+
+### 5. Firewall (recommended, not mandatory)
+
+The built-in rate limiter + `--auth-file` keep anonymous abuse cheap, but a layer-3 filter still helps:
+
+```sh
 sudo ufw default deny incoming
-sudo ufw allow from <client IP> to any port 443 proto tcp
-sudo ufw allow 22/tcp        # SSH for the operator
+sudo ufw allow 443/tcp
+sudo ufw allow 22/tcp
 sudo ufw enable
 ```
 
-If clients use a dynamic IP, either set up DDNS + a cron job that refreshes the rule, or wait for phase-4 Reality (camouflage), after which active-probing DPI reaches a legitimate whitelisted site instead of raw SOCKS5.
+For the strongest posture, replace the `443/tcp` blanket rule with an IP allowlist of your clients. Dynamic-IP clients should use `--auth-file` and leave `443/tcp` open.
 
-### 5. Configure a SOCKS5 client (Telegram as one example)
+### 6. Configure a client
 
-In the Telegram mobile or desktop client:
-`Settings` → `Data and Storage` → `Proxy Settings` → `Add Proxy` → `SOCKS5`
-- Server: `<VPS IP or hostname>`
-- Port: `443`
-- Username / Password: empty
+#### Local camouflage bridge (recommended)
 
-In Telegram Desktop: same path, plus `Use proxy for calls` for voice and video.
+On the client machine, run `ayllu-camouflage-client` pointed at your VPS:
 
-Once enabled, Telegram works immediately: messages, calls, and the embedded browser (YouTube loads through it as well).
+```sh
+ayllu-camouflage-client \
+  --listen 127.0.0.1:1080 \
+  --remote <VPS IP or hostname>:443 \
+  --server-name www.microsoft.com \
+  --public-key <base64url> \
+  --short-id <hex> \
+  --auth-file ./credentials
+```
 
-Any other SOCKS5-capable client follows the same pattern.
+Then point Telegram / any other SOCKS5 app at `127.0.0.1:1080`.
 
-### What the current MVP does NOT cover
+In Telegram: `Settings` → `Data and Storage` → `Proxy Settings` → `Add Proxy` → `SOCKS5`:
+- Server: `127.0.0.1`
+- Port: `1080`
+- Username / Password: as in the credentials file (or blank if the bridge handles it).
 
-- **DPI active-probing**: plain SOCKS5 on `:443` can be fingerprinted within 10–30 minutes by sophisticated censors. The mitigation is phase-4 Reality (on the roadmap).
-- **Authentication**: firewall-level IP allowlist only. Username/password auth is the next checkpoint.
-- **UDP (ASSOCIATE)**: not implemented — Telegram's TCP fallback is sufficient for calls, but UDP would add roughly 100 lines if needed.
-- **iOS system Safari and system-wide traffic**: SOCKS5 only covers apps that accept proxy configuration. System-level coverage requires phase-7 WireGuard-over-Ayllu.
+In Telegram Desktop, check `Use proxy for calls` so voice/video go through the bridge as well.
+
+#### Optional metrics scraping
+
+Add `--metrics-listen 127.0.0.1:9090` to the server unit; Prometheus or Grafana Agent can scrape counters for admission success/fallback/silent-drop, session counts, and upstream errors. Counters tell you when your VPS is being actively probed.
+
+### What is still not covered
+
+- **Full Xray-compatible REALITY TLS 1.3** wire format (plain TLS ClientHello on the outer socket). The current admission is HTTP-like-over-TCP and is detectable by sophisticated DPI on sustained observation. Next session's work.
+- **SIGHUP hot-reload** of keys and cover pool — currently a `systemctl restart` is required after editing `/etc/ayllu/camouflage.env`.
+- **UDP (ASSOCIATE)** in the SOCKS5 layer — TCP fallback is sufficient for Telegram voice/video.
+- **iOS system-wide traffic**: SOCKS5 only covers apps that accept proxy settings. iOS Safari and native apps need WireGuard-over-Ayllu (phase 7).
 
 ## Structure
 
 ```
-core/        phase-1 (done)
-proxy/       phase-3 SOCKS5 MVP (done)
-cli/         ayllu + ayllu-proxy binaries
+core/        phase-1 protocol primitives (done, hardened)
+proxy/       phase-3 SOCKS5 + auth + timeouts (done, end-to-end verified)
+camouflage/  phase-4 hardening landed; full REALITY TLS wire-compat next
+cli/         binaries: ayllu, ayllu-proxy, ayllu-camouflage-proxy,
+             ayllu-camouflage-client, ayllu-reality-keygen
+deploy/      systemd unit + env template for VPS rollout
 chat/        phase-2 — not started
-camouflage/  phase-4 Reality — not started
 mesh/        phase-13+ — later phases
 prototypes/  mesh-chat-disposable.html — reference UI for phase-2
 ```
