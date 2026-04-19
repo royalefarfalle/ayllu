@@ -30,28 +30,24 @@ pub fn fingerprint(
     return out;
 }
 
+const testing_helpers = @import("testing.zig");
+
 fn ramp(comptime start: u8) [32]u8 {
     var arr: [32]u8 = undefined;
     for (&arr, 0..) |*b, i| b.* = start +% @as(u8, @intCast(i));
     return arr;
 }
 
-fn hex(comptime s: *const [64]u8) Fingerprint {
-    var out: Fingerprint = undefined;
-    _ = std.fmt.hexToBytes(&out, s) catch unreachable;
-    return out;
-}
-
 test "fingerprint golden vector v1 — asymmetric inputs" {
     const ed = ramp(0x01); // 0x01..0x20
     const x = ramp(0x81); //  0x81..0xA0
-    const expected = hex("9ae4f0e46d9dbf8575c5812f858a92a7f16ae57ac5a336ab165467df0cdfe776");
+    const expected = testing_helpers.hex32("9ae4f0e46d9dbf8575c5812f858a92a7f16ae57ac5a336ab165467df0cdfe776");
     try std.testing.expectEqualSlices(u8, &expected, &fingerprint(ed, x));
 }
 
 test "fingerprint golden vector v1 — zero keys" {
     const zero: [32]u8 = @splat(0);
-    const expected = hex("00ea1658a9c34367d24a49b64c3b8b90fe5c99b37e49f2d3b4bd839abf73ea29");
+    const expected = testing_helpers.hex32("00ea1658a9c34367d24a49b64c3b8b90fe5c99b37e49f2d3b4bd839abf73ea29");
     try std.testing.expectEqualSlices(u8, &expected, &fingerprint(zero, zero));
 }
 

@@ -56,11 +56,7 @@ pub const Identity = struct {
     }
 };
 
-fn hex32(comptime s: *const [64]u8) [32]u8 {
-    var out: [32]u8 = undefined;
-    _ = std.fmt.hexToBytes(&out, s) catch unreachable;
-    return out;
-}
+const hex32 = @import("testing.zig").hex32;
 
 test "fromSeed is deterministic" {
     const seed: [32]u8 = @splat(0x42);

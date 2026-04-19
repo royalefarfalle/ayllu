@@ -10,7 +10,7 @@ const crypto = @import("crypto.zig");
 const Identity = @import("identity.zig").Identity;
 const PublicIdentity = @import("identity.zig").PublicIdentity;
 
-pub const envelope_version: u8 = 1;
+pub const current_version: u8 = 1;
 pub const id_length = 16;
 pub const Id = [id_length]u8;
 
@@ -28,11 +28,10 @@ pub const Target = union(enum) {
 pub const VerifyError = error{
     FingerprintMismatch,
     WrongVersion,
-    SignatureVerificationFailed,
 } || crypto.Ed25519.Signature.VerifyError;
 
 pub const Envelope = struct {
-    version: u8 = envelope_version,
+    version: u8,
     id: Id,
     from: crypto.Fingerprint,
     to: Target,
@@ -58,7 +57,7 @@ pub const Envelope = struct {
     }
 
     pub fn verify(self: Envelope, sender: PublicIdentity) VerifyError!void {
-        if (self.version != envelope_version) return error.WrongVersion;
+        if (self.version != current_version) return error.WrongVersion;
         if (!std.mem.eql(u8, &self.from, &sender.fingerprint())) {
             return error.FingerprintMismatch;
         }
@@ -78,9 +77,10 @@ pub fn buildAndSign(
     var env_id: Id = undefined;
     io.random(&env_id);
     const from = sender.fingerprint();
-    const d = computeDigest(envelope_version, env_id, from, to, created_at, expires_at, payload);
+    const d = computeDigest(current_version, env_id, from, to, created_at, expires_at, payload);
     const sig = try sender.sign(&d);
     return .{
+        .version = current_version,
         .id = env_id,
         .from = from,
         .to = to,
@@ -129,11 +129,7 @@ fn computeDigest(
     return out;
 }
 
-fn hex32(comptime s: *const [64]u8) [32]u8 {
-    var out: [32]u8 = undefined;
-    _ = std.fmt.hexToBytes(&out, s) catch unreachable;
-    return out;
-}
+const hex32 = @import("testing.zig").hex32;
 
 test "buildAndSign + verify — fingerprint target" {
     const io = std.testing.io;
@@ -219,8 +215,8 @@ test "isExpired semantics" {
 test "digest is deterministic for identical inputs" {
     const fp: crypto.Fingerprint = @splat(0x11);
     const id: Id = @splat(0x22);
-    const d1 = computeDigest(envelope_version, id, fp, .broadcast, 100, 200, "p");
-    const d2 = computeDigest(envelope_version, id, fp, .broadcast, 100, 200, "p");
+    const d1 = computeDigest(current_version, id, fp, .broadcast, 100, 200, "p");
+    const d2 = computeDigest(current_version, id, fp, .broadcast, 100, 200, "p");
     try std.testing.expectEqualSlices(u8, &d1, &d2);
 }
 
@@ -228,9 +224,9 @@ test "digest distinguishes different Target variants" {
     const fp_a: crypto.Fingerprint = @splat(0x33);
     const fp_b: crypto.Fingerprint = @splat(0x33); // same bytes, different variant
     const id: Id = @splat(0x44);
-    const d_broadcast = computeDigest(envelope_version, id, fp_a, .broadcast, 0, 0, "p");
-    const d_fp = computeDigest(envelope_version, id, fp_a, .{ .fingerprint = fp_b }, 0, 0, "p");
-    const d_mc = computeDigest(envelope_version, id, fp_a, .{ .multicast = fp_b }, 0, 0, "p");
+    const d_broadcast = computeDigest(current_version, id, fp_a, .broadcast, 0, 0, "p");
+    const d_fp = computeDigest(current_version, id, fp_a, .{ .fingerprint = fp_b }, 0, 0, "p");
+    const d_mc = computeDigest(current_version, id, fp_a, .{ .multicast = fp_b }, 0, 0, "p");
     try std.testing.expect(!std.mem.eql(u8, &d_broadcast, &d_fp));
     try std.testing.expect(!std.mem.eql(u8, &d_fp, &d_mc));
     try std.testing.expect(!std.mem.eql(u8, &d_broadcast, &d_mc));
@@ -241,10 +237,10 @@ test "digest is domain-separated from raw SHA256 of fields" {
     const id: Id = @splat(0);
     var naive: [32]u8 = undefined;
     var h = crypto.Sha256.init(.{});
-    h.update(&.{envelope_version});
+    h.update(&.{current_version});
     h.update(&id);
     h.update(&fp);
-    h.update(&.{0}); // broadcast tag
+    h.update(&.{0});
     var tsb: [8]u8 = undefined;
     std.mem.writeInt(i64, &tsb, 0, .little);
     h.update(&tsb);
@@ -253,41 +249,51 @@ test "digest is domain-separated from raw SHA256 of fields" {
     h.update(&tsb);
     h.update("x");
     h.final(&naive);
-    const tagged = computeDigest(envelope_version, id, fp, .broadcast, 0, 0, "x");
+    const tagged = computeDigest(current_version, id, fp, .broadcast, 0, 0, "x");
     try std.testing.expect(!std.mem.eql(u8, &naive, &tagged));
 }
 
 test "digest golden vector v1" {
     const from: crypto.Fingerprint = @splat(0xAB);
     const id: Id = @splat(0xCD);
-    const d = computeDigest(envelope_version, id, from, .broadcast, 1700, 1800, "hi");
+    const d = computeDigest(current_version, id, from, .broadcast, 1700, 1800, "hi");
     const expected = hex32("38d26a22a82c740ece03c8522e93d22d8084e53df91583b38f4e3290be1a3f32");
     try std.testing.expectEqualSlices(u8, &expected, &d);
 }
 
 test "distinct envelope ids produce distinct digests" {
     const from: crypto.Fingerprint = @splat(0x55);
-    const a = computeDigest(envelope_version, @splat(0x01), from, .broadcast, 0, 0, "p");
-    const b = computeDigest(envelope_version, @splat(0x02), from, .broadcast, 0, 0, "p");
+    const a = computeDigest(current_version, @splat(0x01), from, .broadcast, 0, 0, "p");
+    const b = computeDigest(current_version, @splat(0x02), from, .broadcast, 0, 0, "p");
     try std.testing.expect(!std.mem.eql(u8, &a, &b));
 }
 
 test "distinct payloads produce distinct digests (length-prefixed)" {
     const from: crypto.Fingerprint = @splat(0x77);
     const id: Id = @splat(0x88);
-    const a = computeDigest(envelope_version, id, from, .broadcast, 0, 0, "abc");
-    const b = computeDigest(envelope_version, id, from, .broadcast, 0, 0, "abcd");
+    const a = computeDigest(current_version, id, from, .broadcast, 0, 0, "abc");
+    const b = computeDigest(current_version, id, from, .broadcast, 0, 0, "abcd");
     try std.testing.expect(!std.mem.eql(u8, &a, &b));
 }
 
-test "payload-length prefix blocks ambiguous concatenation" {
+test "digest incorporates payload length prefix" {
     const from: crypto.Fingerprint = @splat(0x99);
     const id: Id = @splat(0xAA);
-    const split = computeDigest(envelope_version, id, from, .broadcast, 0, 0, "abcdef");
-    const merged = computeDigest(envelope_version, id, from, .broadcast, 0, 0, "abc" ++ "def");
-    try std.testing.expectEqualSlices(u8, &split, &merged);
-    const different = computeDigest(envelope_version, id, from, .broadcast, 0, 0, "ab" ++ "cdefg");
-    try std.testing.expect(!std.mem.eql(u8, &split, &different));
+    const actual = computeDigest(current_version, id, from, .broadcast, 0, 0, "payload");
+    var without_len: [32]u8 = undefined;
+    var h = crypto.Sha256.init(.{});
+    h.update(digest_domain);
+    h.update(&.{current_version});
+    h.update(&id);
+    h.update(&from);
+    h.update(&.{0});
+    var ts: [8]u8 = undefined;
+    std.mem.writeInt(i64, &ts, 0, .little);
+    h.update(&ts);
+    h.update(&ts);
+    h.update("payload");
+    h.final(&without_len);
+    try std.testing.expect(!std.mem.eql(u8, &actual, &without_len));
 }
 
 test "buildAndSign includes sender fingerprint in from" {
