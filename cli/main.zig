@@ -5,11 +5,16 @@ const ayllu = @import("ayllu");
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
 
-    var stdout_buffer: [512]u8 = undefined;
+    var stdout_buffer: [1024]u8 = undefined;
     var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
     const out = &stdout_file_writer.interface;
 
-    try out.print("ayllu phase {d}\n", .{ayllu.phase});
+    try out.print("ayllu — phase {d}\n", .{ayllu.phase});
+    try out.print("  crypto:    Ed25519 + X25519 + SHA-256 fingerprint\n", .{});
+    try out.print("  identity:  Identity (runa) + PublicIdentity\n", .{});
+    try out.print("  envelope:  signed quipu, v{d} digest\n", .{ayllu.envelope.current_version});
+    try out.print("  transport: vtable interface + in-memory loopback\n", .{});
+    try out.print("  registry:  OR-Set CRDT for group membership\n", .{});
     try out.flush();
 }
 
