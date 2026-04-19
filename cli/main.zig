@@ -16,3 +16,9 @@ pub fn main(init: std.process.Init) !void {
 test "cli links against ayllu module" {
     try std.testing.expect(ayllu.phase >= 1);
 }
+
+test "ayllu public surface exposes crypto.fingerprint" {
+    const zero: [32]u8 = @splat(0);
+    const fp = ayllu.crypto.fingerprint(zero, zero);
+    try std.testing.expectEqual(@as(usize, 32), fp.len);
+}
