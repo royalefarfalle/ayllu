@@ -9,6 +9,7 @@
         "build.zig.zon",
         "core",
         "cli",
+        "proxy",
         "SPEC.md",
         "README.md",
     },

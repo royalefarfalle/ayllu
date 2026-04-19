@@ -1,0 +1,2750 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Mesh Chat</title>
+    <style id="app-style">
+      :root {
+        color-scheme: dark;
+        --bg: #0c1115;
+        --bg-soft: rgba(17, 24, 29, 0.82);
+        --card: rgba(18, 24, 30, 0.84);
+        --card-strong: rgba(24, 32, 40, 0.94);
+        --surface: rgba(255, 255, 255, 0.04);
+        --surface-strong: rgba(255, 255, 255, 0.065);
+        --line: rgba(226, 232, 240, 0.09);
+        --text: #edf1f2;
+        --muted: #9ea7ad;
+        --accent: #7ac7b8;
+        --accent-strong: #5fb1a2;
+        --warn: #d9a36a;
+        --danger: #d78585;
+        --shadow: 0 20px 48px rgba(0, 0, 0, 0.24);
+        --radius: 28px 20px 28px 20px;
+        --radius-soft: 18px 14px 18px 14px;
+        --font-ui: "SF Pro Display", "SF Pro Text", "Segoe UI", sans-serif;
+        --font-serif: "New York", "Iowan Old Style", "Palatino Linotype", serif;
+        --font-mono: "SF Mono", "JetBrains Mono", monospace;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        min-height: 100%;
+        background:
+          radial-gradient(circle at top left, rgba(122, 199, 184, 0.12), transparent 24%),
+          radial-gradient(circle at top right, rgba(111, 141, 179, 0.1), transparent 20%),
+          linear-gradient(180deg, #101418 0%, #0d1114 42%, #0a0d10 100%);
+        color: var(--text);
+        font-family: var(--font-ui);
+      }
+
+      body::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        background:
+          linear-gradient(135deg, rgba(255, 255, 255, 0.02), transparent 24%),
+          linear-gradient(180deg, rgba(255, 244, 224, 0.015), transparent 36%);
+      }
+
+      button,
+      input,
+      select,
+      textarea {
+        font: inherit;
+      }
+
+      button,
+      input,
+      select,
+      textarea {
+        border: 0;
+        outline: 0;
+      }
+
+      button {
+        cursor: pointer;
+      }
+
+      .app-shell {
+        width: min(1100px, calc(100vw - 32px));
+        margin: 0 auto;
+        padding: 24px 0 96px;
+      }
+
+      .header {
+        position: sticky;
+        top: 12px;
+        z-index: 20;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 14px 18px;
+        margin-bottom: 18px;
+        border: 1px solid var(--line);
+        border-radius: 28px 18px 28px 18px;
+        background: rgba(16, 22, 27, 0.84);
+        backdrop-filter: blur(12px);
+        box-shadow: var(--shadow);
+      }
+
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+      }
+
+      .brand-mark {
+        width: 44px;
+        height: 44px;
+        display: grid;
+        place-items: center;
+        border-radius: 16px 12px 16px 12px;
+        background: rgba(122, 199, 184, 0.12);
+        border: 1px solid rgba(122, 199, 184, 0.16);
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+        font-weight: 700;
+        letter-spacing: 0.08em;
+      }
+
+      .brand-copy strong {
+        display: block;
+        font-family: var(--font-serif);
+        font-size: 1.1rem;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+      }
+
+      .brand-copy span {
+        color: var(--muted);
+        font-size: 0.92rem;
+      }
+
+      .header-actions {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+      }
+
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 10px 14px;
+        border-radius: 18px 14px 18px 14px;
+        background: var(--surface);
+        border: 1px solid var(--line);
+        color: var(--muted);
+        font-size: 0.9rem;
+      }
+
+      .badge strong {
+        color: var(--text);
+      }
+
+      .layout {
+        display: grid;
+        gap: 16px;
+      }
+
+      .grid {
+        display: grid;
+        gap: 16px;
+      }
+
+      .grid-main {
+        grid-template-columns: 1.25fr 0.85fr;
+      }
+
+      .grid-secondary {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+
+      .panel {
+        position: relative;
+        overflow: hidden;
+        padding: 20px;
+        border-radius: var(--radius);
+        border: 1px solid var(--line);
+        background: var(--card);
+        backdrop-filter: blur(10px);
+        box-shadow: var(--shadow);
+      }
+
+      .panel::after {
+        content: none;
+      }
+
+      .panel-head {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 16px;
+        margin-bottom: 18px;
+      }
+
+      .panel-head h2,
+      .panel-head h3 {
+        margin: 0;
+        font-family: var(--font-serif);
+        font-weight: 600;
+        letter-spacing: 0.02em;
+      }
+
+      .panel-head h2::after,
+      .panel-head h3::after {
+        content: "";
+        display: block;
+        width: 26px;
+        height: 2px;
+        margin-top: 10px;
+        border-radius: 999px;
+        background: rgba(122, 199, 184, 0.55);
+      }
+
+      .panel-head p {
+        margin: 6px 0 0;
+        color: var(--muted);
+        font-size: 0.95rem;
+        line-height: 1.5;
+      }
+
+      .stack {
+        display: grid;
+        gap: 14px;
+      }
+
+      .row {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+
+      .row > * {
+        flex: 1 1 0;
+      }
+
+      .field {
+        display: grid;
+        gap: 8px;
+      }
+
+      .field label,
+      .inline-label {
+        color: var(--muted);
+        font-size: 0.9rem;
+      }
+
+      .input,
+      .select,
+      .textarea {
+        width: 100%;
+        padding: 14px 16px;
+        border-radius: var(--radius-soft);
+        background: var(--surface);
+        border: 1px solid var(--line);
+        color: var(--text);
+        resize: vertical;
+      }
+
+      .textarea {
+        min-height: 110px;
+      }
+
+      .button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        min-height: 46px;
+        padding: 0 18px;
+        border-radius: var(--radius-soft);
+        background: var(--surface);
+        color: var(--text);
+        border: 1px solid var(--line);
+        transition: transform 140ms ease-out, background 140ms ease-out, border-color 140ms ease-out;
+      }
+
+      .button:hover {
+        transform: translateY(-1px);
+        background: var(--surface-strong);
+      }
+
+      .button:disabled {
+        opacity: 0.48;
+        cursor: default;
+        transform: none;
+      }
+
+      .button-accent {
+        background: rgba(122, 199, 184, 0.14);
+        border-color: rgba(122, 199, 184, 0.22);
+        color: #d7f0ea;
+      }
+
+      .button-danger {
+        background: rgba(215, 133, 133, 0.12);
+        border-color: rgba(215, 133, 133, 0.22);
+        color: #ffd8d8;
+      }
+
+      .button-warn {
+        background: rgba(217, 163, 106, 0.13);
+        border-color: rgba(217, 163, 106, 0.22);
+        color: #f3decb;
+      }
+
+      .notice {
+        padding: 14px 16px;
+        border-radius: var(--radius-soft);
+        background: var(--surface);
+        border: 1px solid var(--line);
+        color: var(--muted);
+      }
+
+      .notice[data-tone="ok"] {
+        color: #b6f7e6;
+        border-color: rgba(143, 240, 214, 0.26);
+      }
+
+      .notice[data-tone="warn"] {
+        color: #ffd4b2;
+        border-color: rgba(255, 183, 135, 0.24);
+      }
+
+      .notice[data-tone="danger"] {
+        color: #ffd0d2;
+        border-color: rgba(255, 111, 115, 0.28);
+      }
+
+      .mono {
+        font-family: var(--font-mono);
+        font-size: 0.88rem;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .mini-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+        gap: 12px;
+      }
+
+      .stat {
+        padding: 14px;
+        border-radius: 18px 14px 18px 14px;
+        background: var(--surface);
+        border: 1px solid var(--line);
+      }
+
+      .stat strong {
+        display: block;
+        margin-top: 8px;
+        font-size: 1rem;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .chip-list {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+
+      .chip {
+        padding: 8px 12px;
+        border-radius: 16px 12px 16px 12px;
+        border: 1px solid var(--line);
+        background: var(--surface);
+        color: var(--muted);
+        font-size: 0.88rem;
+      }
+
+      .list {
+        display: grid;
+        gap: 12px;
+      }
+
+      .item {
+        padding: 14px;
+        border-radius: 20px 14px 20px 14px;
+        background: var(--surface);
+        border: 1px solid var(--line);
+      }
+
+      .item-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 8px;
+      }
+
+      .item-title {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .item-title strong {
+        display: block;
+      }
+
+      .item-title span {
+        display: block;
+        color: var(--muted);
+        font-size: 0.85rem;
+      }
+
+      .item-actions {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+
+      .feed {
+        display: grid;
+        gap: 12px;
+        max-height: 460px;
+        overflow: auto;
+        padding-right: 4px;
+      }
+
+      .bubble {
+        padding: 14px 16px;
+        border-radius: 20px 14px 20px 14px;
+        background: var(--surface);
+        border: 1px solid var(--line);
+      }
+
+      .bubble[data-mine="true"] {
+        background: rgba(122, 199, 184, 0.1);
+        border-color: rgba(122, 199, 184, 0.18);
+      }
+
+      .bubble-meta {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 8px;
+      }
+
+      .bubble-meta strong {
+        font-size: 0.96rem;
+      }
+
+      .bubble-meta span {
+        color: var(--muted);
+        font-size: 0.82rem;
+      }
+
+      .bubble p {
+        margin: 0;
+        line-height: 1.55;
+        white-space: pre-wrap;
+      }
+
+      .code-box {
+        min-height: 164px;
+        font-family: var(--font-mono);
+        font-size: 0.82rem;
+      }
+
+      .map-wrap {
+        display: grid;
+        gap: 14px;
+      }
+
+      canvas {
+        width: 100%;
+        height: 280px;
+        display: block;
+        border-radius: 24px 16px 24px 16px;
+        background: rgba(8, 12, 16, 0.92);
+        border: 1px solid var(--line);
+      }
+
+      .lock-shell {
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+      }
+
+      .lock-card {
+        width: min(980px, 100%);
+        display: grid;
+        grid-template-columns: 1fr 0.9fr;
+        gap: 18px;
+        padding: 18px;
+        border-radius: 32px 22px 32px 22px;
+        background: rgba(12, 17, 21, 0.84);
+        border: 1px solid var(--line);
+        box-shadow: var(--shadow);
+        backdrop-filter: blur(12px);
+      }
+
+      .notes-shell,
+      .calc-shell {
+        border-radius: 28px 18px 28px 18px;
+        padding: 18px;
+        border: 1px solid var(--line);
+        background: var(--surface);
+      }
+
+      .note-sheet {
+        min-height: 360px;
+        padding: 18px 20px;
+        border-radius: 24px;
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(241, 230, 192, 0.95));
+        color: #26323d;
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8);
+      }
+
+      .note-sheet h1 {
+        margin: 0 0 12px;
+        font-family: var(--font-serif);
+        font-size: 2rem;
+      }
+
+      .note-sheet p {
+        margin: 0;
+        color: #4f5d66;
+        line-height: 1.65;
+      }
+
+      .calc-display {
+        display: grid;
+        gap: 10px;
+        margin-bottom: 14px;
+      }
+
+      .calc-screen {
+        min-height: 90px;
+        padding: 16px;
+        border-radius: 20px 14px 20px 14px;
+        background: rgba(6, 10, 13, 0.86);
+        border: 1px solid var(--line);
+        font-family: var(--font-mono);
+        text-align: right;
+      }
+
+      .calc-screen strong {
+        display: block;
+        font-size: 2rem;
+        margin-top: 18px;
+      }
+
+      .calc-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      .calc-key {
+        min-height: 60px;
+        border-radius: 18px 14px 18px 14px;
+        display: grid;
+        place-items: center;
+        background: var(--surface);
+        border: 1px solid var(--line);
+        color: var(--text);
+      }
+
+      .switch {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        color: var(--muted);
+      }
+
+      .switch input {
+        width: 18px;
+        height: 18px;
+      }
+
+      .floating-panic {
+        position: fixed;
+        right: 20px;
+        bottom: 20px;
+        z-index: 30;
+        min-width: 124px;
+      }
+
+      .empty {
+        padding: 18px;
+        border-radius: 20px 14px 20px 14px;
+        border: 1px dashed rgba(226, 232, 240, 0.14);
+        color: var(--muted);
+      }
+
+      .tiny {
+        color: var(--muted);
+        font-size: 0.83rem;
+        line-height: 1.55;
+      }
+
+      @media (max-width: 980px) {
+        .grid-main,
+        .grid-secondary,
+        .lock-card {
+          grid-template-columns: 1fr;
+        }
+
+        .app-shell {
+          width: min(100vw - 20px, 1100px);
+          padding-top: 16px;
+        }
+
+        .header {
+          border-radius: 24px 18px 24px 18px;
+          align-items: flex-start;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script id="app-script">
+      (() => {
+        "use strict";
+
+        const WORDS = [
+          "anchor", "apricot", "ash", "aster", "atlas", "aurora", "badge", "basil",
+          "bay", "beacon", "birch", "bloom", "brass", "brisk", "cable", "caper",
+          "caramel", "cedar", "chalk", "cinder", "citrus", "cliff", "cobalt", "comet",
+          "copper", "coral", "crown", "crystal", "dahlia", "delta", "drift", "ember",
+          "fable", "falcon", "fern", "field", "flint", "flora", "foam", "forest",
+          "frost", "gale", "garden", "glade", "glass", "glow", "grain", "grove",
+          "harbor", "hazel", "hearth", "helium", "heron", "hollow", "horizon", "iris",
+          "jade", "jasmine", "jetty", "juniper", "kestrel", "keystone", "lagoon", "lantern",
+          "laurel", "lilac", "linen", "lotus", "lumen", "mango", "maple", "marble",
+          "marina", "meadow", "mercury", "mesa", "meteor", "mint", "mirage", "mist",
+          "monarch", "moss", "murmur", "nectar", "nickel", "north", "nova", "oasis",
+          "ocean", "olive", "onyx", "opal", "orbit", "orchid", "origin", "otter",
+          "paper", "pearl", "pebble", "pepper", "petal", "pine", "plume", "poppy",
+          "prism", "quartz", "quill", "quiet", "radar", "raven", "reef", "relay",
+          "river", "robin", "rose", "sable", "sage", "saffron", "sail", "salt",
+          "samber", "sand", "saturn", "scarlet", "shadow", "shore", "signal", "silk",
+          "silver", "sky", "slate", "smoke", "solstice", "sparrow", "spruce", "star",
+          "stone", "storm", "sunset", "tangent", "tallow", "teal", "tempest", "thistle",
+          "tide", "timber", "topaz", "torch", "trail", "trident", "tulip", "tundra",
+          "umbra", "union", "vale", "velvet", "verge", "violet", "vista", "vivid",
+          "walnut", "wave", "willow", "wind", "winter", "wisp", "wood", "zephyr",
+          "amber", "arc", "bamboo", "barley", "berry", "blue", "brook", "canyon",
+          "cardinal", "cello", "chime", "cinderblock", "clover", "coast", "dune", "echo",
+          "elm", "fennel", "finch", "fjord", "garnet", "ginger", "harvest", "hyacinth",
+          "indigo", "isle", "ivory", "kite", "laguna", "lava", "lemon", "lunar",
+          "mistral", "mulberry", "nectarine", "nickelstone", "opaline", "palm", "papaya", "parchment",
+          "peony", "pioneer", "pinecone", "rain", "reed", "sierra", "sprout", "starlight",
+          "sugar", "sumac", "swift", "sycamore", "teak", "terra", "thyme", "truffle",
+          "verdant", "wheat", "whisper", "yarrow", "yellow", "zinnia", "argon", "boron",
+          "carbon", "neon", "radon", "xenon", "helios", "sonic", "auric", "cipher",
+          "matrix", "tactic", "vector", "ripple", "emberglow", "sundial", "coldfront", "signalfire"
+        ];
+
+        const CURVE = {
+          p: BigInt("0xffffffff00000001000000000000000000000000ffffffffffffffffffffffff"),
+          a: BigInt("0xffffffff00000001000000000000000000000000fffffffffffffffffffffffc"),
+          b: BigInt("0x5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b"),
+          gx: BigInt("0x6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296"),
+          gy: BigInt("0x4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5"),
+          n: BigInt("0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551")
+        };
+
+        const enc = new TextEncoder();
+        const dec = new TextDecoder();
+        const appNode = document.getElementById("app");
+
+        const state = {
+          sessionUnlocked: false,
+          sessionPassphrase: "",
+          runtimeHash: "pending",
+          lockedInput: "",
+          identity: null,
+          registry: createRegistry(),
+          peers: new Map(),
+          peerFingerprintBySession: new Map(),
+          pendingJoin: new Map(),
+          // Map<envelopeHash, expiresAtMs>. Bounded-lifetime dedup: entries
+          // drop off after ENVELOPE_REPLAY_WINDOW_MS so the set cannot grow
+          // forever, and envelopes older than the window are rejected outright
+          // (replay protection).
+          seenHashes: new Map(),
+          feed: [],
+          coordinates: new Map(),
+          expiryTimers: new Map(),
+          transportSignals: {
+            localBlob: "",
+            remoteBlob: ""
+          },
+          drafts: {
+            alias: "",
+            recoverMnemonic: "",
+            intro: "",
+            message: "",
+            mapLabel: "",
+            mapX: "48",
+            mapY: "52",
+            banReason: "manual reject"
+          },
+          busy: "",
+          notice: {
+            tone: "ok",
+            text: "Single-file foundation ready. Identity and all state stay in memory only."
+          },
+          autoWipeOnBlur: false,
+          selfTests: [],
+          renderQueued: false
+        };
+
+        function escapeHtml(value) {
+          return String(value)
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;")
+            .replace(/'/g, "&#39;");
+        }
+
+        function canonicalize(value) {
+          if (value === null || typeof value !== "object") {
+            return JSON.stringify(value);
+          }
+          if (Array.isArray(value)) {
+            return "[" + value.map(canonicalize).join(",") + "]";
+          }
+          const keys = Object.keys(value).sort();
+          return "{" + keys.map((key) => JSON.stringify(key) + ":" + canonicalize(value[key])).join(",") + "}";
+        }
+
+        function mod(value, modulus) {
+          const result = value % modulus;
+          return result >= 0n ? result : result + modulus;
+        }
+
+        function modInverse(value, modulus) {
+          let a = mod(value, modulus);
+          let b = modulus;
+          let x = 0n;
+          let y = 1n;
+          let u = 1n;
+          let v = 0n;
+          while (a !== 0n) {
+            const q = b / a;
+            const r = b % a;
+            const m = x - u * q;
+            const n = y - v * q;
+            b = a;
+            a = r;
+            x = u;
+            y = v;
+            u = m;
+            v = n;
+          }
+          if (b !== 1n) {
+            throw new Error("No modular inverse");
+          }
+          return mod(x, modulus);
+        }
+
+        function pointAdd(left, right) {
+          if (!left) {
+            return right;
+          }
+          if (!right) {
+            return left;
+          }
+          if (left.x === right.x) {
+            if (mod(left.y + right.y, CURVE.p) === 0n) {
+              return null;
+            }
+            return pointDouble(left);
+          }
+          const slope = mod((right.y - left.y) * modInverse(right.x - left.x, CURVE.p), CURVE.p);
+          const x = mod(slope * slope - left.x - right.x, CURVE.p);
+          const y = mod(slope * (left.x - x) - left.y, CURVE.p);
+          return { x, y };
+        }
+
+        function pointDouble(point) {
+          if (!point) {
+            return null;
+          }
+          if (point.y === 0n) {
+            return null;
+          }
+          const slope = mod((3n * point.x * point.x + CURVE.a) * modInverse(2n * point.y, CURVE.p), CURVE.p);
+          const x = mod(slope * slope - 2n * point.x, CURVE.p);
+          const y = mod(slope * (point.x - x) - point.y, CURVE.p);
+          return { x, y };
+        }
+
+        function scalarMultiply(scalar, point) {
+          let result = null;
+          let addend = point;
+          let k = mod(scalar, CURVE.n);
+          while (k > 0n) {
+            if (k & 1n) {
+              result = pointAdd(result, addend);
+            }
+            addend = pointDouble(addend);
+            k >>= 1n;
+          }
+          return result;
+        }
+
+        function bytesToHex(bytes) {
+          return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+        }
+
+        function hexToBytes(hex) {
+          const clean = hex.length % 2 === 0 ? hex : "0" + hex;
+          const bytes = new Uint8Array(clean.length / 2);
+          for (let index = 0; index < clean.length; index += 2) {
+            bytes[index / 2] = parseInt(clean.slice(index, index + 2), 16);
+          }
+          return bytes;
+        }
+
+        function bytesToBigInt(bytes) {
+          return BigInt("0x" + bytesToHex(bytes));
+        }
+
+        function bigIntToBytes(value, length) {
+          let hex = value.toString(16);
+          if (hex.length % 2) {
+            hex = "0" + hex;
+          }
+          hex = hex.padStart(length * 2, "0");
+          return hexToBytes(hex);
+        }
+
+        function bytesToBase64(bytes) {
+          let binary = "";
+          for (const byte of bytes) {
+            binary += String.fromCharCode(byte);
+          }
+          return btoa(binary);
+        }
+
+        function base64ToBytes(value) {
+          const binary = atob(value);
+          const bytes = new Uint8Array(binary.length);
+          for (let index = 0; index < binary.length; index += 1) {
+            bytes[index] = binary.charCodeAt(index);
+          }
+          return bytes;
+        }
+
+        function bytesToBase64Url(bytes) {
+          return bytesToBase64(bytes).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+        }
+
+        function base64UrlToBytes(value) {
+          const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+          const padded = normalized + "===".slice((normalized.length + 3) % 4);
+          return base64ToBytes(padded);
+        }
+
+        function normalizeMnemonic(rawMnemonic) {
+          return rawMnemonic
+            .trim()
+            .toLowerCase()
+            .replace(/\s+/g, " ");
+        }
+
+        async function sha256Bytes(input) {
+          const bytes = typeof input === "string" ? enc.encode(input) : input;
+          const hash = await crypto.subtle.digest("SHA-256", bytes);
+          return new Uint8Array(hash);
+        }
+
+        async function sha256Hex(input) {
+          return bytesToHex(await sha256Bytes(input));
+        }
+
+        async function deriveScalarFromMnemonic(mnemonic) {
+          const normalized = normalizeMnemonic(mnemonic);
+          const material = await crypto.subtle.importKey("raw", enc.encode(normalized), "PBKDF2", false, ["deriveBits"]);
+          const bits = await crypto.subtle.deriveBits(
+            {
+              name: "PBKDF2",
+              hash: "SHA-256",
+              salt: enc.encode("mesh-chat/v1/mnemonic"),
+              iterations: 200000
+            },
+            material,
+            256
+          );
+          return mod(bytesToBigInt(new Uint8Array(bits)), CURVE.n - 1n) + 1n;
+        }
+
+        function publicPointFromScalar(scalar) {
+          const point = scalarMultiply(scalar, { x: CURVE.gx, y: CURVE.gy });
+          if (!point) {
+            throw new Error("Invalid scalar");
+          }
+          return point;
+        }
+
+        function signPrivateJwkFromScalar(scalar, point) {
+          return {
+            kty: "EC",
+            crv: "P-256",
+            ext: true,
+            key_ops: ["sign"],
+            d: bytesToBase64Url(bigIntToBytes(scalar, 32)),
+            x: bytesToBase64Url(bigIntToBytes(point.x, 32)),
+            y: bytesToBase64Url(bigIntToBytes(point.y, 32))
+          };
+        }
+
+        function ecdhPrivateJwkFromScalar(scalar, point) {
+          return {
+            kty: "EC",
+            crv: "P-256",
+            ext: true,
+            key_ops: ["deriveBits"],
+            d: bytesToBase64Url(bigIntToBytes(scalar, 32)),
+            x: bytesToBase64Url(bigIntToBytes(point.x, 32)),
+            y: bytesToBase64Url(bigIntToBytes(point.y, 32))
+          };
+        }
+
+        function publicJwkFromPoint(point, keyOps) {
+          return {
+            kty: "EC",
+            crv: "P-256",
+            ext: true,
+            key_ops: keyOps,
+            x: bytesToBase64Url(bigIntToBytes(point.x, 32)),
+            y: bytesToBase64Url(bigIntToBytes(point.y, 32))
+          };
+        }
+
+        async function createIdentityFromMnemonic(mnemonic, alias) {
+          const scalar = await deriveScalarFromMnemonic(mnemonic);
+          const point = publicPointFromScalar(scalar);
+          const signKey = await crypto.subtle.importKey(
+            "jwk",
+            signPrivateJwkFromScalar(scalar, point),
+            { name: "ECDSA", namedCurve: "P-256" },
+            true,
+            ["sign"]
+          );
+          const verifyKey = await crypto.subtle.importKey(
+            "jwk",
+            publicJwkFromPoint(point, ["verify"]),
+            { name: "ECDSA", namedCurve: "P-256" },
+            true,
+            ["verify"]
+          );
+          const agreementKey = await crypto.subtle.importKey(
+            "jwk",
+            ecdhPrivateJwkFromScalar(scalar, point),
+            { name: "ECDH", namedCurve: "P-256" },
+            true,
+            ["deriveBits"]
+          );
+          const fingerprintFull = await sha256Hex(canonicalize(publicJwkFromPoint(point, [])));
+          return {
+            alias: alias || "Field Node",
+            mnemonic: normalizeMnemonic(mnemonic),
+            fingerprint: fingerprintFull.slice(0, 24),
+            fingerprintFull,
+            publicJwk: publicJwkFromPoint(point, []),
+            signKey,
+            verifyKey,
+            agreementKey
+          };
+        }
+
+        function randomMnemonic() {
+          const words = [];
+          const random = crypto.getRandomValues(new Uint16Array(12));
+          for (let index = 0; index < 12; index += 1) {
+            words.push(WORDS[random[index] % WORDS.length]);
+          }
+          return words.join(" ");
+        }
+
+        async function signEnvelope(envelope) {
+          const payload = enc.encode(canonicalize(signableEnvelope(envelope)));
+          const signature = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, state.identity.signKey, payload);
+          return bytesToBase64(new Uint8Array(signature));
+        }
+
+        async function verifyEnvelopeSignature(envelope) {
+          const payload = enc.encode(canonicalize(signableEnvelope(envelope)));
+          const verifyKey = await crypto.subtle.importKey(
+            "jwk",
+            {
+              ...envelope.publicKey,
+              ext: true,
+              key_ops: ["verify"]
+            },
+            { name: "ECDSA", namedCurve: "P-256" },
+            false,
+            ["verify"]
+          );
+          return crypto.subtle.verify(
+            { name: "ECDSA", hash: "SHA-256" },
+            verifyKey,
+            base64ToBytes(envelope.signature),
+            payload
+          );
+        }
+
+        function signableEnvelope(envelope) {
+          return {
+            sender: envelope.sender,
+            publicKey: envelope.publicKey,
+            payload: envelope.payload,
+            timestamp: envelope.timestamp
+          };
+        }
+
+        async function hashEnvelope(envelope) {
+          return sha256Hex(
+            canonicalize({
+              sender: envelope.sender,
+              publicKey: envelope.publicKey,
+              payload: envelope.payload,
+              timestamp: envelope.timestamp,
+              signature: envelope.signature
+            })
+          );
+        }
+
+        async function createEnvelope(payload) {
+          const envelope = {
+            sender: state.identity.fingerprint,
+            publicKey: state.identity.publicJwk,
+            payload,
+            timestamp: new Date().toISOString(),
+            route: [state.identity.fingerprint],
+            signature: ""
+          };
+          envelope.signature = await signEnvelope(envelope);
+          return envelope;
+        }
+
+        function createRegistry() {
+          return {
+            adds: new Map(),
+            removes: new Map(),
+            version: new Map(),
+            bans: new Map(),
+            log: []
+          };
+        }
+
+        function vectorToObject(vector) {
+          return Object.fromEntries(vector.entries());
+        }
+
+        function objectToVector(objectValue) {
+          return new Map(Object.entries(objectValue || {}).map(([key, value]) => [key, Number(value)]));
+        }
+
+        function nextRegistryClock(actor) {
+          const current = state.registry.version.get(actor) || 0;
+          return current + 1;
+        }
+
+        function buildAddOp(member) {
+          const actor = state.identity.fingerprint;
+          const clock = nextRegistryClock(actor);
+          return {
+            kind: "add",
+            actor,
+            clock,
+            member,
+            tag: actor + ":" + clock,
+            createdAt: new Date().toISOString()
+          };
+        }
+
+        function buildRemoveOp(memberFingerprint, tags) {
+          const actor = state.identity.fingerprint;
+          const clock = nextRegistryClock(actor);
+          return {
+            kind: "remove",
+            actor,
+            clock,
+            memberFingerprint,
+            tags,
+            createdAt: new Date().toISOString()
+          };
+        }
+
+        function buildBanOp(memberFingerprint, reason) {
+          const actor = state.identity.fingerprint;
+          const clock = nextRegistryClock(actor);
+          return {
+            kind: "ban",
+            actor,
+            clock,
+            memberFingerprint,
+            reason,
+            createdAt: new Date().toISOString()
+          };
+        }
+
+        function applyRegistryOp(op) {
+          const currentClock = state.registry.version.get(op.actor) || 0;
+          if (op.clock <= currentClock) {
+            return false;
+          }
+          state.registry.version.set(op.actor, op.clock);
+          state.registry.log.push(op);
+
+          if (op.kind === "add") {
+            // Ban wins. If we already know this member is banned, keep the
+            // log entry for sync but do not resurrect their add state.
+            if (!state.registry.bans.has(op.member.fingerprint)) {
+              const memberAdds = state.registry.adds.get(op.member.fingerprint) || new Map();
+              memberAdds.set(op.tag, op.member);
+              state.registry.adds.set(op.member.fingerprint, memberAdds);
+            }
+          }
+
+          if (op.kind === "remove") {
+            const removed = state.registry.removes.get(op.memberFingerprint) || new Set();
+            for (const tag of op.tags) {
+              removed.add(tag);
+            }
+            state.registry.removes.set(op.memberFingerprint, removed);
+          }
+
+          if (op.kind === "ban") {
+            state.registry.bans.set(op.memberFingerprint, {
+              actor: op.actor,
+              reason: op.reason,
+              createdAt: op.createdAt
+            });
+            // Ban subsumes every past add/remove for this fingerprint, so
+            // their OR-Set tombstones can be dropped. Without this, each
+            // ban left the removes set growing forever, which was the main
+            // unbounded memory path in the registry. Sync correctness is
+            // preserved because the ban op itself (which IS kept in the
+            // log) carries all the state any peer needs to converge.
+            state.registry.adds.delete(op.memberFingerprint);
+            state.registry.removes.delete(op.memberFingerprint);
+            // Ban also makes every prior log op for this member redundant.
+            // Peers that replay the ban will perform the same GC, so it is
+            // safe to prune the pre-ban history here.
+            state.registry.log = state.registry.log.filter((entry) => {
+              if (entry === op) {
+                return true;
+              }
+              const target = entry.member?.fingerprint || entry.memberFingerprint;
+              return target !== op.memberFingerprint;
+            });
+          }
+
+          return true;
+        }
+
+        function activeTagsFor(memberFingerprint) {
+          const adds = state.registry.adds.get(memberFingerprint);
+          if (!adds) {
+            return [];
+          }
+          const removed = state.registry.removes.get(memberFingerprint) || new Set();
+          return Array.from(adds.keys()).filter((tag) => !removed.has(tag));
+        }
+
+        function registryMember(memberFingerprint) {
+          const adds = state.registry.adds.get(memberFingerprint);
+          if (!adds) {
+            return null;
+          }
+          const removed = state.registry.removes.get(memberFingerprint) || new Set();
+          const activeEntries = Array.from(adds.entries())
+            .filter(([tag]) => !removed.has(tag))
+            .map(([, member]) => member);
+          if (!activeEntries.length) {
+            return null;
+          }
+          return activeEntries[activeEntries.length - 1];
+        }
+
+        function listRegistryMembers() {
+          const members = [];
+          for (const fingerprint of state.registry.adds.keys()) {
+            if (state.registry.bans.has(fingerprint)) {
+              continue;
+            }
+            const member = registryMember(fingerprint);
+            if (member) {
+              members.push(member);
+            }
+          }
+          return members.sort((left, right) => left.alias.localeCompare(right.alias));
+        }
+
+        function exportMissingOps(remoteVectorObject) {
+          const remoteVector = objectToVector(remoteVectorObject);
+          return state.registry.log.filter((op) => op.clock > (remoteVector.get(op.actor) || 0));
+        }
+
+        async function deriveSharedSecret(remotePublicJwk, localAgreementKey) {
+          const remoteKey = await crypto.subtle.importKey(
+            "jwk",
+            {
+              ...remotePublicJwk,
+              ext: true,
+              key_ops: []
+            },
+            { name: "ECDH", namedCurve: "P-256" },
+            false,
+            []
+          );
+          const shared = await crypto.subtle.deriveBits(
+            { name: "ECDH", public: remoteKey },
+            localAgreementKey || state.identity.agreementKey,
+            256
+          );
+          return new Uint8Array(shared);
+        }
+
+        // AES-GCM with a long-lived ECDH shared secret is unsafe if the same
+        // (key, nonce) pair is ever reused. To make reuse mathematically
+        // irrelevant, every message derives its own AES key via HKDF with a
+        // fresh random salt. Even if two salts collided (2^-64 after ~2^64
+        // messages) only that single ciphertext would be affected.
+        async function deriveMessageKey(sharedSecret, salt) {
+          const hkdfKey = await crypto.subtle.importKey(
+            "raw",
+            sharedSecret,
+            "HKDF",
+            false,
+            ["deriveKey"]
+          );
+          return crypto.subtle.deriveKey(
+            {
+              name: "HKDF",
+              hash: "SHA-256",
+              salt,
+              info: enc.encode("mesh-chat/v1/direct-message")
+            },
+            hkdfKey,
+            { name: "AES-GCM", length: 256 },
+            false,
+            ["encrypt", "decrypt"]
+          );
+        }
+
+        // Forward secrecy, sender side. For every direct message we mint a
+        // fresh ephemeral ECDH keypair, derive the shared secret from
+        // (ephemeral_priv × recipient_identity_pub), and drop the ephemeral
+        // private on the floor the moment encryption finishes. Even if the
+        // sender's long-lived identity key is captured hours later, past
+        // ciphertexts cannot be reconstructed because their ephemeral half
+        // no longer exists. The box carries the ephemeral public so the
+        // recipient can redo the ECDH with their identity private. (This
+        // closes sender-side FS; recipient-side FS would additionally
+        // require rotating recipient pre-keys a la X3DH, which is tracked
+        // as future work.)
+        async function encryptForPeer(remotePublicJwk, plaintext) {
+          const ephemeral = await crypto.subtle.generateKey(
+            { name: "ECDH", namedCurve: "P-256" },
+            true,
+            ["deriveBits"]
+          );
+          const ephemeralPublicJwk = await crypto.subtle.exportKey("jwk", ephemeral.publicKey);
+          const sharedSecret = await deriveSharedSecret(remotePublicJwk, ephemeral.privateKey);
+          const salt = crypto.getRandomValues(new Uint8Array(16));
+          const iv = crypto.getRandomValues(new Uint8Array(12));
+          const key = await deriveMessageKey(sharedSecret, salt);
+          const ciphertext = await crypto.subtle.encrypt(
+            { name: "AES-GCM", iv },
+            key,
+            enc.encode(plaintext)
+          );
+          return {
+            ephemeral: {
+              kty: ephemeralPublicJwk.kty,
+              crv: ephemeralPublicJwk.crv,
+              x: ephemeralPublicJwk.x,
+              y: ephemeralPublicJwk.y
+            },
+            salt: bytesToBase64(salt),
+            iv: bytesToBase64(iv),
+            ciphertext: bytesToBase64(new Uint8Array(ciphertext))
+          };
+        }
+
+        async function decryptFromPeer(remotePublicJwk, box) {
+          if (!box || typeof box.salt !== "string") {
+            throw new Error("Encrypted box is missing its HKDF salt.");
+          }
+          // Prefer the per-message ephemeral public embedded in the box
+          // (forward-secure path). Fall back to the sender's identity key
+          // only for legacy boxes from older versions of this single file
+          // that had not yet adopted ephemeral senders.
+          const senderPublic = box.ephemeral || remotePublicJwk;
+          const sharedSecret = await deriveSharedSecret(senderPublic);
+          const key = await deriveMessageKey(sharedSecret, base64ToBytes(box.salt));
+          const plaintext = await crypto.subtle.decrypt(
+            { name: "AES-GCM", iv: base64ToBytes(box.iv) },
+            key,
+            base64ToBytes(box.ciphertext)
+          );
+          return dec.decode(plaintext);
+        }
+
+        // Replay window: accept envelopes whose timestamp sits in
+        // [now - REPLAY_WINDOW, now + FUTURE_SKEW]. Envelopes older than the
+        // window are rejected, so an adversary who records traffic cannot
+        // replay it indefinitely later. Envelope hashes are remembered only
+        // for the length of the window, which also bounds memory usage.
+        const ENVELOPE_REPLAY_WINDOW_MS = 5 * 60 * 1000;
+        const ENVELOPE_FUTURE_SKEW_MS = 60 * 1000;
+
+        function envelopeTimestampOk(envelope) {
+          const ts = Date.parse(envelope.timestamp);
+          if (Number.isNaN(ts)) {
+            return false;
+          }
+          const now = Date.now();
+          if (ts > now + ENVELOPE_FUTURE_SKEW_MS) {
+            return false;
+          }
+          if (ts < now - ENVELOPE_REPLAY_WINDOW_MS) {
+            return false;
+          }
+          return true;
+        }
+
+        function gcSeenHashes() {
+          const now = Date.now();
+          for (const [hash, expiresAt] of state.seenHashes) {
+            if (expiresAt <= now) {
+              state.seenHashes.delete(hash);
+            }
+          }
+        }
+
+        function markHashSeen(hash) {
+          state.seenHashes.set(hash, Date.now() + ENVELOPE_REPLAY_WINDOW_MS);
+          if (state.seenHashes.size > 2048) {
+            gcSeenHashes();
+          }
+        }
+
+        function hashSeen(hash) {
+          const expiresAt = state.seenHashes.get(hash);
+          if (expiresAt === undefined) {
+            return false;
+          }
+          if (expiresAt <= Date.now()) {
+            state.seenHashes.delete(hash);
+            return false;
+          }
+          return true;
+        }
+
+        async function rememberEnvelope(envelope) {
+          markHashSeen(await hashEnvelope(envelope));
+        }
+
+        function pushFeedItem(item) {
+          state.feed.unshift(item);
+          if (item.expiresAt) {
+            const delay = Math.max(item.expiresAt - Date.now(), 0);
+            const timer = setTimeout(() => {
+              state.feed = state.feed.filter((entry) => entry.id !== item.id);
+              if (item.type === "coord" && state.coordinates.get(item.sender)?.id === item.id) {
+                state.coordinates.delete(item.sender);
+              }
+              scheduleRender();
+            }, delay);
+            state.expiryTimers.set(item.id, timer);
+          }
+        }
+
+        function setBusy(text) {
+          state.busy = text;
+          scheduleRender();
+        }
+
+        function clearBusy() {
+          state.busy = "";
+          scheduleRender();
+        }
+
+        function setNotice(text, tone) {
+          state.notice = { text, tone: tone || "ok" };
+          scheduleRender();
+        }
+
+        function formatAgo(timestamp) {
+          const delta = Date.now() - new Date(timestamp).getTime();
+          const seconds = Math.max(Math.round(delta / 1000), 0);
+          if (seconds < 60) {
+            return seconds + "s ago";
+          }
+          const minutes = Math.round(seconds / 60);
+          if (minutes < 60) {
+            return minutes + "m ago";
+          }
+          const hours = Math.round(minutes / 60);
+          return hours + "h ago";
+        }
+
+        function healthStatus() {
+          const approvedPeers = listRegistryMembers().filter((member) => member.fingerprint !== state.identity?.fingerprint).length;
+          const connectedPeers = Array.from(state.peers.values()).filter((peer) => peer.channel?.readyState === "open").length;
+          if (!connectedPeers) {
+            return "isolated";
+          }
+          if (!approvedPeers) {
+            return "screening";
+          }
+          return connectedPeers > 1 ? "mesh-ready" : "linked";
+        }
+
+        function shortFingerprint(fingerprint) {
+          if (!fingerprint) {
+            return "none";
+          }
+          return fingerprint.slice(0, 6) + "..." + fingerprint.slice(-6);
+        }
+
+        // Format a fingerprint in space-separated groups of 4 hex chars so
+        // two humans can read it back to each other out-of-band. Verifying
+        // this is the ONLY defence against a malicious signaling relay
+        // substituting keys at first contact.
+        function groupedFingerprint(fingerprint) {
+          if (!fingerprint) {
+            return "none";
+          }
+          return fingerprint.match(/.{1,4}/g).join(" ");
+        }
+
+        // --- Transport trust model ---------------------------------------
+        // Everything below this line (WebRTC session setup, ICE candidate
+        // exchange, signal blobs that travel over QR / clipboard / chat) is
+        // treated as an UNTRUSTED relay. A hostile relay can observe that two
+        // peers are pairing and can try to substitute its own keys, but it
+        // cannot forge traffic: every envelope that crosses the data channel
+        // is checked at the application layer in handleIncomingEnvelope()
+        // against (1) ECDSA signature over a canonicalized body, (2) an
+        // exact match between the sender's advertised public key and the
+        // one recorded in the registry, and (3) the replay window + dedup
+        // map. Direct-message bodies are also end-to-end encrypted with an
+        // HKDF-derived per-message key, so a relay that MITMs the data
+        // channel sees only ciphertext. The one thing transport cannot
+        // protect against is key substitution at first contact, which is
+        // why the UI surfaces each peer's fingerprint verbatim so users can
+        // compare it out-of-band before approving a join request.
+        function createPeerSession() {
+          const connection = new RTCPeerConnection({
+            iceServers: []
+          });
+          const session = {
+            id: crypto.randomUUID(),
+            connection,
+            channel: null,
+            candidates: [],
+            state: "connecting",
+            remoteFingerprint: "",
+            remoteAlias: "",
+            startedAt: Date.now()
+          };
+          state.peers.set(session.id, session);
+
+          connection.onicecandidate = (event) => {
+            if (event.candidate) {
+              session.candidates.push(event.candidate.toJSON());
+            }
+          };
+
+          connection.onconnectionstatechange = () => {
+            session.state = connection.connectionState || "connecting";
+            if (["closed", "failed", "disconnected"].includes(session.state)) {
+              if (session.remoteFingerprint) {
+                state.peerFingerprintBySession.delete(session.id);
+              }
+            }
+            scheduleRender();
+          };
+
+          connection.ondatachannel = (event) => {
+            bindDataChannel(session, event.channel);
+          };
+
+          return session;
+        }
+
+        function bindDataChannel(session, channel) {
+          session.channel = channel;
+          channel.onopen = () => {
+            session.state = "open";
+            void sendSystemEnvelope({
+              type: "join-request",
+              alias: state.identity.alias,
+              intro: state.drafts.intro || "requesting link",
+              requestedAt: new Date().toISOString()
+            }, session.id);
+            void sendSystemEnvelope({
+              type: "sync-request",
+              vector: vectorToObject(state.registry.version)
+            }, session.id);
+            setNotice("Peer channel open. Join request and registry sync sent.", "ok");
+            scheduleRender();
+          };
+          channel.onclose = () => {
+            session.state = "closed";
+            scheduleRender();
+          };
+          channel.onerror = () => {
+            session.state = "error";
+            scheduleRender();
+          };
+          channel.onmessage = (event) => {
+            void handleIncomingEnvelope(event.data, session.id);
+          };
+        }
+
+        function sessionSignalBlob(session) {
+          return JSON.stringify(
+            {
+              description: session.connection.localDescription,
+              candidates: session.candidates
+            },
+            null,
+            2
+          );
+        }
+
+        function parseSignalBlob(blob) {
+          const parsed = JSON.parse(blob);
+          if (!parsed.description || !Array.isArray(parsed.candidates)) {
+            throw new Error("Signal blob must include description and candidates.");
+          }
+          return parsed;
+        }
+
+        function waitForIceGathering(connection) {
+          if (connection.iceGatheringState === "complete") {
+            return Promise.resolve();
+          }
+          return new Promise((resolve) => {
+            const onStateChange = () => {
+              if (connection.iceGatheringState === "complete") {
+                connection.removeEventListener("icegatheringstatechange", onStateChange);
+                resolve();
+              }
+            };
+            connection.addEventListener("icegatheringstatechange", onStateChange);
+            setTimeout(() => {
+              connection.removeEventListener("icegatheringstatechange", onStateChange);
+              resolve();
+            }, 4000);
+          });
+        }
+
+        async function createOfferFlow() {
+          const session = createPeerSession();
+          bindDataChannel(session, session.connection.createDataChannel("mesh-chat"));
+          const offer = await session.connection.createOffer();
+          await session.connection.setLocalDescription(offer);
+          await waitForIceGathering(session.connection);
+          state.transportSignals.localBlob = sessionSignalBlob(session);
+          setNotice("Offer ready. Send the blob to the other device.", "ok");
+        }
+
+        async function answerOfferFlow(blob) {
+          const remoteSignal = parseSignalBlob(blob);
+          const session = createPeerSession();
+          await session.connection.setRemoteDescription(remoteSignal.description);
+          for (const candidate of remoteSignal.candidates) {
+            await session.connection.addIceCandidate(candidate);
+          }
+          const answer = await session.connection.createAnswer();
+          await session.connection.setLocalDescription(answer);
+          await waitForIceGathering(session.connection);
+          state.transportSignals.localBlob = sessionSignalBlob(session);
+          setNotice("Answer ready. Send it back to the offer creator.", "ok");
+        }
+
+        async function acceptAnswerFlow(blob) {
+          const remoteSignal = parseSignalBlob(blob);
+          const pending = Array.from(state.peers.values()).find(
+            (peer) => peer.connection.signalingState === "have-local-offer"
+          );
+          if (!pending) {
+            throw new Error("No local offer is waiting for an answer.");
+          }
+          await pending.connection.setRemoteDescription(remoteSignal.description);
+          for (const candidate of remoteSignal.candidates) {
+            await pending.connection.addIceCandidate(candidate);
+          }
+          setNotice("Remote answer applied. Waiting for data channel open.", "ok");
+        }
+
+        async function sendToPeer(sessionId, envelope) {
+          const session = state.peers.get(sessionId);
+          if (!session || !session.channel || session.channel.readyState !== "open") {
+            throw new Error("Peer channel is not open.");
+          }
+          session.channel.send(JSON.stringify(envelope));
+        }
+
+        async function sendSystemEnvelope(payload, sessionId) {
+          const envelope = await createEnvelope(payload);
+          await sendToPeer(sessionId, envelope);
+        }
+
+        async function broadcastEnvelope(envelope, skipSessionId) {
+          const seenRoute = new Set(envelope.route || []);
+          seenRoute.add(state.identity.fingerprint);
+          for (const [sessionId, peer] of state.peers.entries()) {
+            if (sessionId === skipSessionId) {
+              continue;
+            }
+            if (!peer.channel || peer.channel.readyState !== "open") {
+              continue;
+            }
+            if (peer.remoteFingerprint && seenRoute.has(peer.remoteFingerprint)) {
+              continue;
+            }
+            const forwarded = {
+              ...envelope,
+              route: Array.from(seenRoute)
+            };
+            peer.channel.send(JSON.stringify(forwarded));
+          }
+        }
+
+        async function handleIncomingEnvelope(rawData, sessionId) {
+          let envelope;
+          try {
+            envelope = JSON.parse(rawData);
+          } catch (error) {
+            setNotice("Ignored malformed envelope.", "warn");
+            return;
+          }
+          if (!envelope || typeof envelope !== "object") {
+            return;
+          }
+          if (!envelope.route) {
+            envelope.route = [];
+          }
+          if (!envelopeTimestampOk(envelope)) {
+            setNotice("Dropped envelope outside the replay-protection window.", "warn");
+            return;
+          }
+          const envelopeHash = await hashEnvelope(envelope);
+          if (hashSeen(envelopeHash)) {
+            return;
+          }
+          const validSignature = await verifyEnvelopeSignature(envelope).catch(() => false);
+          if (!validSignature) {
+            setNotice("Signature check failed for an incoming envelope.", "danger");
+            return;
+          }
+          const knownMember = registryMember(envelope.sender);
+          if (knownMember && canonicalize(knownMember.publicJwk) !== canonicalize(envelope.publicKey)) {
+            setNotice("Rejected sender with mismatched registered public key.", "danger");
+            return;
+          }
+          if (
+            state.registry.bans.has(envelope.sender) &&
+            envelope.payload?.type !== "sync-request" &&
+            envelope.payload?.type !== "sync-response"
+          ) {
+            return;
+          }
+          if (!gateEnvelopeByMembership(envelope)) {
+            setNotice("Envelope dropped by membership gate.", "warn");
+            return;
+          }
+
+          markHashSeen(envelopeHash);
+          if (!envelope.route.includes(state.identity.fingerprint)) {
+            envelope.route.push(state.identity.fingerprint);
+          }
+          await processEnvelope(envelope, sessionId);
+          await broadcastEnvelope(envelope, sessionId);
+          scheduleRender();
+        }
+
+        function gateEnvelopeByMembership(envelope) {
+          if (envelope.sender === state.identity.fingerprint) {
+            return true;
+          }
+          const systemTypes = new Set(["join-request", "sync-request", "sync-response"]);
+          if (systemTypes.has(envelope.payload?.type)) {
+            return true;
+          }
+          return Boolean(registryMember(envelope.sender));
+        }
+
+        async function processEnvelope(envelope, sessionId) {
+          const session = state.peers.get(sessionId);
+          if (session) {
+            session.remoteFingerprint = envelope.sender;
+            state.peerFingerprintBySession.set(sessionId, envelope.sender);
+          }
+
+          switch (envelope.payload?.type) {
+            case "join-request":
+              state.pendingJoin.set(envelope.sender, {
+                fingerprint: envelope.sender,
+                alias: envelope.payload.alias || "Unknown",
+                intro: envelope.payload.intro || "",
+                publicJwk: envelope.publicKey,
+                receivedAt: envelope.timestamp
+              });
+              if (session) {
+                session.remoteAlias = envelope.payload.alias || "Unknown";
+              }
+              setNotice("Join request received. Review it in the trust panel.", "warn");
+              return;
+
+            case "sync-request": {
+              const response = await createEnvelope({
+                type: "sync-response",
+                vector: vectorToObject(state.registry.version),
+                ops: exportMissingOps(envelope.payload.vector)
+              });
+              await sendToPeer(sessionId, response);
+              return;
+            }
+
+            case "sync-response":
+              for (const op of envelope.payload.ops || []) {
+                applyRegistryOp(op);
+              }
+              return;
+
+            case "registry-op":
+              applyRegistryOp(envelope.payload.op);
+              return;
+
+            case "chat":
+              pushFeedItem({
+                id: crypto.randomUUID(),
+                sender: envelope.sender,
+                alias: envelope.payload.alias || shortFingerprint(envelope.sender),
+                text: envelope.payload.text,
+                encrypted: false,
+                mine: envelope.sender === state.identity.fingerprint,
+                createdAt: envelope.timestamp,
+                type: "chat",
+                expiresAt: envelope.payload.ttlMs ? Date.now() + envelope.payload.ttlMs : null
+              });
+              return;
+
+            case "encrypted-chat":
+              if (envelope.payload.target !== state.identity.fingerprint) {
+                return;
+              }
+              try {
+                const plaintext = await decryptFromPeer(envelope.publicKey, envelope.payload.box);
+                const parsed = JSON.parse(plaintext);
+                pushFeedItem({
+                  id: crypto.randomUUID(),
+                  sender: envelope.sender,
+                  alias: parsed.alias || shortFingerprint(envelope.sender),
+                  text: parsed.text,
+                  encrypted: true,
+                  mine: false,
+                  createdAt: envelope.timestamp,
+                  type: "chat",
+                  expiresAt: parsed.ttlMs ? Date.now() + parsed.ttlMs : null
+                });
+              } catch (error) {
+                setNotice("Encrypted payload could not be decrypted.", "danger");
+              }
+              return;
+
+            case "coord": {
+              const coord = {
+                id: crypto.randomUUID(),
+                sender: envelope.sender,
+                alias: envelope.payload.alias || shortFingerprint(envelope.sender),
+                x: Number(envelope.payload.x),
+                y: Number(envelope.payload.y),
+                label: envelope.payload.label || "",
+                createdAt: envelope.timestamp,
+                expiresAt: envelope.payload.ttlMs ? Date.now() + envelope.payload.ttlMs : null
+              };
+              state.coordinates.set(envelope.sender, coord);
+              pushFeedItem({
+                ...coord,
+                text: "Shared coordinates " + coord.x + ", " + coord.y + (coord.label ? " (" + coord.label + ")" : ""),
+                mine: envelope.sender === state.identity.fingerprint,
+                type: "coord"
+              });
+              return;
+            }
+
+            default:
+              return;
+          }
+        }
+
+        async function approvePendingMember(fingerprint) {
+          const pending = state.pendingJoin.get(fingerprint);
+          if (!pending) {
+            return;
+          }
+          const op = buildAddOp({
+            fingerprint: pending.fingerprint,
+            alias: pending.alias,
+            publicJwk: pending.publicJwk,
+            approvedBy: state.identity.fingerprint,
+            joinedAt: new Date().toISOString()
+          });
+          applyRegistryOp(op);
+          state.pendingJoin.delete(fingerprint);
+          const envelope = await createEnvelope({
+            type: "registry-op",
+            op
+          });
+          await broadcastEnvelope(envelope);
+          setNotice("Member approved and broadcast through the current cluster.", "ok");
+        }
+
+        async function rejectPendingMember(fingerprint) {
+          const pending = state.pendingJoin.get(fingerprint);
+          if (!pending) {
+            return;
+          }
+          const op = buildBanOp(fingerprint, state.drafts.banReason || "manual reject");
+          applyRegistryOp(op);
+          state.pendingJoin.delete(fingerprint);
+          const envelope = await createEnvelope({
+            type: "registry-op",
+            op
+          });
+          await broadcastEnvelope(envelope);
+          setNotice("Pending member rejected and marked as banned locally.", "warn");
+        }
+
+        async function removeMember(fingerprint) {
+          const tags = activeTagsFor(fingerprint);
+          if (!tags.length) {
+            return;
+          }
+          const op = buildRemoveOp(fingerprint, tags);
+          applyRegistryOp(op);
+          const envelope = await createEnvelope({
+            type: "registry-op",
+            op
+          });
+          await broadcastEnvelope(envelope);
+          setNotice("Member removed from the OR-Set registry.", "warn");
+        }
+
+        function resetEphemeralState() {
+          for (const timer of state.expiryTimers.values()) {
+            clearTimeout(timer);
+          }
+          state.expiryTimers.clear();
+          for (const session of state.peers.values()) {
+            session.channel?.close();
+            session.connection?.close();
+          }
+          state.peers.clear();
+          state.peerFingerprintBySession.clear();
+          state.pendingJoin.clear();
+          state.seenHashes.clear();
+          state.feed = [];
+          state.coordinates.clear();
+          state.transportSignals.localBlob = "";
+          state.transportSignals.remoteBlob = "";
+          state.identity = null;
+          state.registry = createRegistry();
+          state.notice = {
+            tone: "danger",
+            text: "Session state wiped from memory."
+          };
+        }
+
+        function panicWipe(navigate) {
+          resetEphemeralState();
+          state.sessionUnlocked = false;
+          state.sessionPassphrase = "";
+          state.lockedInput = "";
+          scheduleRender();
+          if (navigate) {
+            setTimeout(() => {
+              window.location.replace("about:blank");
+            }, 120);
+          }
+        }
+
+        async function copyToClipboard(text) {
+          try {
+            await navigator.clipboard.writeText(text);
+            setNotice("Copied to clipboard.", "ok");
+          } catch (error) {
+            setNotice("Clipboard unavailable in this context. Copy manually.", "warn");
+          }
+        }
+
+        function registerSelf(identity) {
+          const op = buildAddOp({
+            fingerprint: identity.fingerprint,
+            alias: identity.alias,
+            publicJwk: identity.publicJwk,
+            approvedBy: identity.fingerprint,
+            joinedAt: new Date().toISOString()
+          });
+          applyRegistryOp(op);
+        }
+
+        function renderLockScreen() {
+          return `
+            <div class="lock-shell">
+              <div class="lock-card">
+                <section class="notes-shell">
+                  <div class="note-sheet">
+                    <h1>Quarterly Notes</h1>
+                    <p>Carry list</p>
+                    <p>1. Team check-in tomorrow.</p>
+                    <p>2. Follow up with docks about weather route.</p>
+                    <p>3. Verify handoff phrase before opening the real workspace.</p>
+                    <p style="margin-top: 18px;">Under the shell this file stays single-page, offline and memory-only. Set a session passphrase to reveal the mesh view.</p>
+                  </div>
+                </section>
+                <section class="calc-shell stack">
+                  <div class="calc-display">
+                    <div class="calc-screen">
+                      <span class="tiny">calculator mode</span>
+                      <strong>0.00</strong>
+                    </div>
+                  </div>
+                  <div class="calc-grid">
+                    ${["AC", "%", "+/-", "/", "7", "8", "9", "x", "4", "5", "6", "-", "1", "2", "3", "+", "0", ".", "=", "enter"].map((key) => `<div class="calc-key">${escapeHtml(key)}</div>`).join("")}
+                  </div>
+                  <div class="field">
+                    <label for="lockPassphrase">Session passphrase</label>
+                    <input id="lockPassphrase" class="input" name="lockPassphrase" type="password" value="${escapeHtml(state.lockedInput)}" placeholder="type a session passphrase">
+                  </div>
+                  <div class="row">
+                    <button class="button button-accent" data-action="unlock">Enter Mesh</button>
+                    <button class="button button-danger" data-action="panic">Panic Wipe</button>
+                  </div>
+                  <div class="notice" data-tone="${escapeHtml(state.notice.tone)}">${escapeHtml(state.notice.text)}</div>
+                </section>
+              </div>
+            </div>
+          `;
+        }
+
+        function renderOnboarding() {
+          return `
+            <div class="app-shell">
+              ${renderHeader()}
+              <div class="layout">
+                <section class="panel">
+                  <div class="panel-head">
+                    <div>
+                      <h2>Bootstrap Identity</h2>
+                      <p>Start with the minimum honest foundation: mnemonic-derived identity, no disk writes, no external libraries.</p>
+                    </div>
+                    <div class="badge"><strong>mode</strong> onboarding</div>
+                  </div>
+                  <div class="grid grid-main">
+                    <div class="stack">
+                      <div class="field">
+                        <label for="aliasInput">Display alias</label>
+                        <input id="aliasInput" class="input" name="alias" value="${escapeHtml(state.drafts.alias)}" placeholder="Field Node">
+                      </div>
+                      <div class="row">
+                        <button class="button button-accent" data-action="generate-identity">Generate New Identity</button>
+                        <button class="button" data-action="copy-mnemonic" ${state.notice.text.includes("Mnemonic") ? "" : "disabled"}>Copy Current Mnemonic</button>
+                      </div>
+                      <div class="notice" data-tone="${escapeHtml(state.notice.tone)}">${escapeHtml(state.notice.text)}</div>
+                    </div>
+                    <div class="stack">
+                      <div class="field">
+                        <label for="recoverMnemonic">Recover from 12-word mnemonic</label>
+                        <textarea id="recoverMnemonic" class="textarea" name="recoverMnemonic" placeholder="paste your 12 words">${escapeHtml(state.drafts.recoverMnemonic)}</textarea>
+                      </div>
+                      <button class="button" data-action="recover-identity">Recover Identity</button>
+                      <p class="tiny">This first pass uses a compact mnemonic word set and deterministic P-256 derivation. It is mnemonic-style and recovery-stable, but not full BIP39 compatibility yet.</p>
+                    </div>
+                  </div>
+                </section>
+              </div>
+              <button class="button button-danger floating-panic" data-action="panic">Panic Wipe</button>
+            </div>
+          `;
+        }
+
+        function renderHeader() {
+          const memberCount = state.identity ? listRegistryMembers().length : 0;
+          const peerCount = Array.from(state.peers.values()).filter((peer) => peer.channel?.readyState === "open").length;
+          return `
+            <header class="header">
+              <div class="brand">
+                <div class="brand-mark">MC</div>
+                <div class="brand-copy">
+                  <strong>Mesh Chat</strong>
+                  <span>single HTML, local-first, memory-only</span>
+                </div>
+              </div>
+              <div class="header-actions">
+                <div class="badge"><strong>hash</strong> <span class="mono">${escapeHtml(state.runtimeHash.slice(0, 14))}...</span></div>
+                <div class="badge"><strong>members</strong> ${memberCount}</div>
+                <div class="badge"><strong>peers</strong> ${peerCount}</div>
+                <div class="badge"><strong>health</strong> ${escapeHtml(healthStatus())}</div>
+                <button class="button" data-action="lock">Lock</button>
+              </div>
+            </header>
+          `;
+        }
+
+        function renderMemberItem(member) {
+          const banned = state.registry.bans.has(member.fingerprint);
+          return `
+            <div class="item">
+              <div class="item-head">
+                <div class="item-title">
+                  <div>
+                    <strong>${escapeHtml(member.alias)}</strong>
+                    <span class="mono">${escapeHtml(member.fingerprint)}</span>
+                  </div>
+                </div>
+                <div class="item-actions">
+                  <div class="chip">${member.fingerprint === state.identity.fingerprint ? "root/self" : "approved"}</div>
+                  ${member.fingerprint !== state.identity.fingerprint && !banned ? `<button class="button" data-action="remove-member" data-fingerprint="${escapeHtml(member.fingerprint)}">Remove</button>` : ""}
+                </div>
+              </div>
+            </div>
+          `;
+        }
+
+        function renderPendingItem(pending) {
+          return `
+            <div class="item">
+              <div class="item-head">
+                <div class="item-title">
+                  <div>
+                    <strong>${escapeHtml(pending.alias)}</strong>
+                    <span class="mono">${escapeHtml(pending.fingerprint)}</span>
+                  </div>
+                </div>
+                <div class="item-actions">
+                  <button class="button button-accent" data-action="approve-member" data-fingerprint="${escapeHtml(pending.fingerprint)}">Approve</button>
+                  <button class="button button-warn" data-action="reject-member" data-fingerprint="${escapeHtml(pending.fingerprint)}">Reject</button>
+                </div>
+              </div>
+              <div class="tiny">${escapeHtml(pending.intro || "no intro message")} · ${escapeHtml(formatAgo(pending.receivedAt))}</div>
+            </div>
+          `;
+        }
+
+        function renderFeed() {
+          if (!state.feed.length) {
+            return `<div class="empty">No envelopes in the feed yet. Local messages still show here so you can verify the pipeline before linking a second device.</div>`;
+          }
+          return state.feed
+            .map(
+              (item) => `
+                <article class="bubble" data-mine="${item.mine}">
+                  <div class="bubble-meta">
+                    <strong>${escapeHtml(item.alias)}${item.encrypted ? " · encrypted" : ""}</strong>
+                    <span>${escapeHtml(formatAgo(item.createdAt))}</span>
+                  </div>
+                  <p>${escapeHtml(item.text)}</p>
+                </article>
+              `
+            )
+            .join("");
+        }
+
+        function renderPeerOptions() {
+          const members = listRegistryMembers().filter((member) => member.fingerprint !== state.identity.fingerprint);
+          return `
+            <option value="broadcast">Broadcast signed only</option>
+            ${members.map((member) => `<option value="${escapeHtml(member.fingerprint)}">Encrypt for ${escapeHtml(member.alias)}</option>`).join("")}
+          `;
+        }
+
+        function renderPeerSessions() {
+          const sessions = Array.from(state.peers.values());
+          if (!sessions.length) {
+            return `<div class="empty">No peer sessions yet. Create or accept a signal blob to start.</div>`;
+          }
+          return sessions
+            .map((session) => {
+              const alias = session.remoteAlias || "unknown";
+              const fingerprint = session.remoteFingerprint;
+              const verified = fingerprint && Boolean(registryMember(fingerprint));
+              const statusLabel = session.channel?.readyState === "open" ? session.state : (session.state || "connecting");
+              const badge = verified ? "registry match" : (fingerprint ? "unverified" : "handshake");
+              return `
+                <div class="item">
+                  <strong>${escapeHtml(alias)}</strong>
+                  <div class="tiny">status: ${escapeHtml(statusLabel)} &middot; ${escapeHtml(badge)}</div>
+                  <div class="mono" style="margin-top: 4px;">${escapeHtml(fingerprint ? groupedFingerprint(fingerprint) : "awaiting first envelope")}</div>
+                </div>
+              `;
+            })
+            .join("");
+        }
+
+        function renderDashboard() {
+          const members = listRegistryMembers();
+          const pendings = Array.from(state.pendingJoin.values()).sort((left, right) => left.receivedAt.localeCompare(right.receivedAt));
+          const banned = Array.from(state.registry.bans.entries());
+          return `
+            <div class="app-shell">
+              ${renderHeader()}
+              <div class="layout">
+                <section class="panel">
+                  <div class="panel-head">
+                    <div>
+                      <h2>Identity & Status</h2>
+                      <p>Derived from mnemonic, verified with P-256, and kept in live memory only.</p>
+                    </div>
+                    <div class="badge"><strong>fingerprint</strong> <span class="mono">${escapeHtml(shortFingerprint(state.identity.fingerprint))}</span></div>
+                  </div>
+                  <div class="mini-grid">
+                    <div class="stat">
+                      <span class="tiny">alias</span>
+                      <strong>${escapeHtml(state.identity.alias)}</strong>
+                    </div>
+                    <div class="stat">
+                      <span class="tiny">mnemonic</span>
+                      <strong>${state.identity.mnemonic.split(" ").length} words</strong>
+                    </div>
+                    <div class="stat">
+                      <span class="tiny">registry clock</span>
+                      <strong>${Object.values(vectorToObject(state.registry.version)).reduce((sum, value) => sum + value, 0)}</strong>
+                    </div>
+                    <div class="stat">
+                      <span class="tiny">bundle hash</span>
+                      <strong class="mono">${escapeHtml(state.runtimeHash.slice(0, 16))}</strong>
+                    </div>
+                  </div>
+                  <div class="row" style="margin-top: 16px;">
+                    <button class="button" data-action="copy-fingerprint">Copy Fingerprint</button>
+                    <button class="button" data-action="copy-mnemonic">Copy Mnemonic</button>
+                    <label class="switch">
+                      <input type="checkbox" name="autoWipeOnBlur" ${state.autoWipeOnBlur ? "checked" : ""}>
+                      Auto-wipe on background
+                    </label>
+                  </div>
+                </section>
+
+                <div class="grid grid-main">
+                  <section class="panel">
+                    <div class="panel-head">
+                      <div>
+                        <h2>Chat</h2>
+                        <p>Signed broadcast by default. Pick an approved peer to switch to pairwise ECDH + AES-GCM.</p>
+                      </div>
+                    </div>
+                    <div class="stack">
+                      <div class="row">
+                        <div class="field">
+                          <label for="recipientSelect">Delivery</label>
+                          <select id="recipientSelect" class="select" name="recipient">${renderPeerOptions()}</select>
+                        </div>
+                        <div class="field">
+                          <label for="ttlSelect">TTL</label>
+                          <select id="ttlSelect" class="select" name="ttl">
+                            <option value="300000">5 minutes</option>
+                            <option value="1800000">30 minutes</option>
+                            <option value="7200000">2 hours</option>
+                          </select>
+                        </div>
+                      </div>
+                      <div class="field">
+                        <label for="messageDraft">Message</label>
+                        <textarea id="messageDraft" class="textarea" name="message" placeholder="type a signed envelope">${escapeHtml(state.drafts.message)}</textarea>
+                      </div>
+                      <div class="row">
+                        <button class="button button-accent" data-action="send-message">Send Envelope</button>
+                        <div class="notice" data-tone="${escapeHtml(state.notice.tone)}">${escapeHtml(state.notice.text)}</div>
+                      </div>
+                      <div class="feed">${renderFeed()}</div>
+                    </div>
+                  </section>
+
+                  <section class="panel">
+                    <div class="panel-head">
+                      <div>
+                        <h2>Trust Registry</h2>
+                        <p>OR-Set registry, local approvals, and ban-wins resolution.</p>
+                      </div>
+                    </div>
+                    <div class="stack">
+                      <div class="chip-list">
+                        ${members.map((member) => `<div class="chip">${escapeHtml(member.alias)} · ${escapeHtml(shortFingerprint(member.fingerprint))}</div>`).join("")}
+                      </div>
+                      <div class="list">
+                        ${members.length ? members.map(renderMemberItem).join("") : `<div class="empty">Registry empty.</div>`}
+                      </div>
+                      <div class="panel-head" style="margin: 8px 0 0;">
+                        <div>
+                          <h3>Pending</h3>
+                          <p>Join requests stay pending until a local approval or reject action.</p>
+                        </div>
+                      </div>
+                      <div class="list">
+                        ${pendings.length ? pendings.map(renderPendingItem).join("") : `<div class="empty">No pending requests.</div>`}
+                      </div>
+                      <div class="field">
+                        <label for="banReason">Reject reason</label>
+                        <input id="banReason" class="input" name="banReason" value="${escapeHtml(state.drafts.banReason)}">
+                      </div>
+                      ${banned.length ? `<div class="notice" data-tone="warn">Banned: ${banned.map(([fingerprint, value]) => escapeHtml(shortFingerprint(fingerprint) + " (" + value.reason + ")")).join(", ")}</div>` : ""}
+                    </div>
+                  </section>
+                </div>
+
+                <div class="grid grid-secondary">
+                  <section class="panel">
+                    <div class="panel-head">
+                      <div>
+                        <h3>Manual Link</h3>
+                        <p>Raw WebRTC. The signal blob is an untrusted relay payload &mdash; safety comes from the app-layer signatures and the fingerprint check below.</p>
+                      </div>
+                    </div>
+                    <div class="stack">
+                      <div class="row">
+                        <button class="button button-accent" data-action="create-offer">Create Offer</button>
+                        <button class="button" data-action="create-answer">Create Answer</button>
+                        <button class="button" data-action="accept-answer">Accept Answer</button>
+                      </div>
+                      <div class="field">
+                        <label for="localBlob">Local signal blob</label>
+                        <textarea id="localBlob" class="textarea code-box" readonly>${escapeHtml(state.transportSignals.localBlob)}</textarea>
+                      </div>
+                      <div class="row">
+                        <button class="button" data-action="copy-local-blob" ${state.transportSignals.localBlob ? "" : "disabled"}>Copy Local Blob</button>
+                        <button class="button" data-action="clear-signals">Clear</button>
+                      </div>
+                      <div class="field">
+                        <label for="remoteBlob">Remote blob</label>
+                        <textarea id="remoteBlob" class="textarea code-box" name="remoteBlob" placeholder="paste the other side here">${escapeHtml(state.transportSignals.remoteBlob)}</textarea>
+                      </div>
+                    </div>
+                  </section>
+
+                  <section class="panel">
+                    <div class="panel-head">
+                      <div>
+                        <h3>Peer Sessions</h3>
+                        <p>Read the fingerprint of each live peer back to them out-of-band (voice, paper, visual) before approving. This is the only defence against a malicious relay substituting keys.</p>
+                      </div>
+                    </div>
+                    <div class="stack">
+                      <div class="mini-grid">
+                        <div class="stat">
+                          <span class="tiny">your fingerprint</span>
+                          <strong class="mono">${escapeHtml(groupedFingerprint(state.identity.fingerprint))}</strong>
+                        </div>
+                      </div>
+                      <div class="list">
+                        ${renderPeerSessions()}
+                      </div>
+                    </div>
+                  </section>
+
+                  <section class="panel">
+                    <div class="panel-head">
+                      <div>
+                        <h3>Mesh Map</h3>
+                        <p>Canvas view for coordinate envelopes. Values are 0-100 and expire by TTL like messages.</p>
+                      </div>
+                    </div>
+                    <div class="map-wrap">
+                      <canvas id="meshMap" width="520" height="280"></canvas>
+                      <div class="row">
+                        <div class="field">
+                          <label for="mapLabel">Label</label>
+                          <input id="mapLabel" class="input" name="mapLabel" value="${escapeHtml(state.drafts.mapLabel)}" placeholder="stash">
+                        </div>
+                        <div class="field">
+                          <label for="mapX">X</label>
+                          <input id="mapX" class="input" name="mapX" type="number" min="0" max="100" value="${escapeHtml(state.drafts.mapX)}">
+                        </div>
+                        <div class="field">
+                          <label for="mapY">Y</label>
+                          <input id="mapY" class="input" name="mapY" type="number" min="0" max="100" value="${escapeHtml(state.drafts.mapY)}">
+                        </div>
+                      </div>
+                      <button class="button" data-action="send-coord">Share Coordinates</button>
+                    </div>
+                  </section>
+
+                  <section class="panel">
+                    <div class="panel-head">
+                      <div>
+                        <h3>Verification</h3>
+                        <p>Small self-checks to avoid shipping a broken crypto foundation.</p>
+                      </div>
+                    </div>
+                    <div class="stack">
+                      <div class="list">
+                        ${state.selfTests.map((test) => `<div class="item"><strong>${escapeHtml(test.name)}</strong><div class="tiny">${escapeHtml(test.ok ? "ok" : test.error)}</div></div>`).join("")}
+                      </div>
+                      <div class="tiny">Current scope: crypto primitives, registry ops, manual peer link, ephemerality. Quorum voting, QR fallback and subnet discovery are still later steps.</div>
+                      ${state.busy ? `<div class="notice" data-tone="ok">${escapeHtml(state.busy)}</div>` : ""}
+                    </div>
+                  </section>
+                </div>
+              </div>
+              <button class="button button-danger floating-panic" data-action="panic">Panic Wipe</button>
+            </div>
+          `;
+        }
+
+        function render() {
+          if (!state.sessionUnlocked) {
+            appNode.innerHTML = renderLockScreen();
+            return;
+          }
+          appNode.innerHTML = state.identity ? renderDashboard() : renderOnboarding();
+          paintMap();
+        }
+
+        function scheduleRender() {
+          if (state.renderQueued) {
+            return;
+          }
+          state.renderQueued = true;
+          requestAnimationFrame(() => {
+            state.renderQueued = false;
+            render();
+          });
+        }
+
+        function paintMap() {
+          const canvas = document.getElementById("meshMap");
+          if (!canvas) {
+            return;
+          }
+          const context = canvas.getContext("2d");
+          context.clearRect(0, 0, canvas.width, canvas.height);
+
+          context.strokeStyle = "rgba(255,255,255,0.08)";
+          context.lineWidth = 1;
+          for (let index = 0; index <= 10; index += 1) {
+            const x = (canvas.width / 10) * index;
+            const y = (canvas.height / 10) * index;
+            context.beginPath();
+            context.moveTo(x, 0);
+            context.lineTo(x, canvas.height);
+            context.stroke();
+            context.beginPath();
+            context.moveTo(0, y);
+            context.lineTo(canvas.width, y);
+            context.stroke();
+          }
+
+          for (const coord of state.coordinates.values()) {
+            const x = (coord.x / 100) * canvas.width;
+            const y = canvas.height - (coord.y / 100) * canvas.height;
+            context.fillStyle = coord.sender === state.identity.fingerprint ? "#8ff0d6" : "#7db2ff";
+            context.beginPath();
+            context.arc(x, y, 7, 0, Math.PI * 2);
+            context.fill();
+            context.fillStyle = "#ebf3fb";
+            context.font = "12px SF Mono, monospace";
+            context.fillText(coord.alias + (coord.label ? " · " + coord.label : ""), x + 12, y - 12);
+          }
+        }
+
+        async function handleAction(action, target) {
+          try {
+            switch (action) {
+              case "unlock":
+                if (!state.lockedInput.trim()) {
+                  setNotice("Enter a session passphrase first.", "warn");
+                  return;
+                }
+                if (!state.sessionPassphrase) {
+                  state.sessionPassphrase = state.lockedInput;
+                }
+                if (state.sessionPassphrase !== state.lockedInput) {
+                  setNotice("Wrong session passphrase.", "danger");
+                  return;
+                }
+                state.sessionUnlocked = true;
+                state.lockedInput = "";
+                render();
+                return;
+
+              case "lock":
+                state.sessionUnlocked = false;
+                render();
+                return;
+
+              case "panic":
+                panicWipe(true);
+                return;
+
+              case "generate-identity": {
+                setBusy("Generating deterministic identity...");
+                const mnemonic = randomMnemonic();
+                const alias = state.drafts.alias.trim() || "Field Node";
+                state.identity = await createIdentityFromMnemonic(mnemonic, alias);
+                registerSelf(state.identity);
+                clearBusy();
+                setNotice("Mnemonic generated. Copy it now; nothing is stored on disk.", "ok");
+                render();
+                return;
+              }
+
+              case "recover-identity": {
+                const words = normalizeMnemonic(state.drafts.recoverMnemonic).split(" ").filter(Boolean);
+                if (words.length !== 12) {
+                  setNotice("Recovery needs exactly 12 words in this first prototype.", "warn");
+                  return;
+                }
+                setBusy("Recovering identity from mnemonic...");
+                state.identity = await createIdentityFromMnemonic(state.drafts.recoverMnemonic, state.drafts.alias.trim() || "Recovered Node");
+                registerSelf(state.identity);
+                clearBusy();
+                setNotice("Identity recovered from mnemonic.", "ok");
+                render();
+                return;
+              }
+
+              case "copy-mnemonic":
+                if (!state.identity) {
+                  return;
+                }
+                await copyToClipboard(state.identity.mnemonic);
+                return;
+
+              case "copy-fingerprint":
+                await copyToClipboard(state.identity.fingerprint);
+                return;
+
+              case "create-offer":
+                setBusy("Preparing local offer...");
+                await createOfferFlow();
+                clearBusy();
+                render();
+                return;
+
+              case "create-answer":
+                setBusy("Generating answer from remote offer...");
+                await answerOfferFlow(state.transportSignals.remoteBlob);
+                clearBusy();
+                render();
+                return;
+
+              case "accept-answer":
+                setBusy("Applying remote answer...");
+                await acceptAnswerFlow(state.transportSignals.remoteBlob);
+                clearBusy();
+                render();
+                return;
+
+              case "copy-local-blob":
+                await copyToClipboard(state.transportSignals.localBlob);
+                return;
+
+              case "clear-signals":
+                state.transportSignals.localBlob = "";
+                state.transportSignals.remoteBlob = "";
+                render();
+                return;
+
+              case "approve-member":
+                await approvePendingMember(target.dataset.fingerprint);
+                render();
+                return;
+
+              case "reject-member":
+                await rejectPendingMember(target.dataset.fingerprint);
+                render();
+                return;
+
+              case "remove-member":
+                await removeMember(target.dataset.fingerprint);
+                render();
+                return;
+
+              case "send-message": {
+                const message = state.drafts.message.trim();
+                if (!message) {
+                  setNotice("Type a message first.", "warn");
+                  return;
+                }
+                const recipientSelect = document.getElementById("recipientSelect");
+                const ttlSelect = document.getElementById("ttlSelect");
+                const recipient = recipientSelect?.value || "broadcast";
+                const ttlMs = Number(ttlSelect?.value || 300000);
+
+                if (recipient === "broadcast") {
+                  const envelope = await createEnvelope({
+                    type: "chat",
+                    alias: state.identity.alias,
+                    text: message,
+                    ttlMs
+                  });
+                  await rememberEnvelope(envelope);
+                  await processEnvelope(envelope, "");
+                  await broadcastEnvelope(envelope);
+                } else {
+                  const member = registryMember(recipient);
+                  if (!member) {
+                    setNotice("Pick an approved peer for encrypted delivery.", "warn");
+                    return;
+                  }
+                  const box = await encryptForPeer(member.publicJwk, JSON.stringify({
+                    alias: state.identity.alias,
+                    text: message,
+                    ttlMs
+                  }));
+                  const envelope = await createEnvelope({
+                    type: "encrypted-chat",
+                    target: recipient,
+                    box
+                  });
+                  await rememberEnvelope(envelope);
+                  pushFeedItem({
+                    id: crypto.randomUUID(),
+                    sender: state.identity.fingerprint,
+                    alias: state.identity.alias,
+                    text: message,
+                    encrypted: true,
+                    mine: true,
+                    createdAt: new Date().toISOString(),
+                    type: "chat",
+                    expiresAt: Date.now() + ttlMs
+                  });
+                  await broadcastEnvelope(envelope);
+                }
+
+                state.drafts.message = "";
+                render();
+                return;
+              }
+
+              case "send-coord": {
+                const ttlSelect = document.getElementById("ttlSelect");
+                const ttlMs = Number(ttlSelect?.value || 300000);
+                const x = Math.min(100, Math.max(0, Number(state.drafts.mapX)));
+                const y = Math.min(100, Math.max(0, Number(state.drafts.mapY)));
+                const envelope = await createEnvelope({
+                  type: "coord",
+                  alias: state.identity.alias,
+                  x,
+                  y,
+                  label: state.drafts.mapLabel.trim(),
+                  ttlMs
+                });
+                await rememberEnvelope(envelope);
+                await processEnvelope(envelope, "");
+                await broadcastEnvelope(envelope);
+                render();
+                return;
+              }
+
+              default:
+                return;
+            }
+          } catch (error) {
+            clearBusy();
+            setNotice(error instanceof Error ? error.message : "Unexpected error", "danger");
+          }
+        }
+
+        document.addEventListener("click", (event) => {
+          const target = event.target.closest("[data-action]");
+          if (!target) {
+            return;
+          }
+          void handleAction(target.dataset.action, target);
+        });
+
+        document.addEventListener("input", (event) => {
+          const target = event.target;
+          if (!(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)) {
+            return;
+          }
+          if (target.name === "alias") {
+            state.drafts.alias = target.value;
+          }
+          if (target.name === "recoverMnemonic") {
+            state.drafts.recoverMnemonic = target.value;
+          }
+          if (target.name === "message") {
+            state.drafts.message = target.value;
+          }
+          if (target.name === "mapLabel") {
+            state.drafts.mapLabel = target.value;
+          }
+          if (target.name === "mapX") {
+            state.drafts.mapX = target.value;
+          }
+          if (target.name === "mapY") {
+            state.drafts.mapY = target.value;
+          }
+          if (target.name === "banReason") {
+            state.drafts.banReason = target.value;
+          }
+          if (target.name === "remoteBlob") {
+            state.transportSignals.remoteBlob = target.value;
+          }
+          if (target.name === "lockPassphrase") {
+            state.lockedInput = target.value;
+          }
+        });
+
+        document.addEventListener("change", (event) => {
+          const target = event.target;
+          if (target instanceof HTMLInputElement && target.name === "autoWipeOnBlur") {
+            state.autoWipeOnBlur = target.checked;
+            setNotice(target.checked ? "Auto-wipe armed for background transitions." : "Auto-wipe disarmed.", target.checked ? "warn" : "ok");
+          }
+        });
+
+        document.addEventListener("visibilitychange", () => {
+          if (document.hidden && state.autoWipeOnBlur) {
+            panicWipe(true);
+          }
+        });
+
+        async function runSelfTests() {
+          const tests = [];
+          try {
+            const one = publicPointFromScalar(1n);
+            tests.push({
+              name: "P-256 scalar 1 matches base point",
+              ok: one.x === CURVE.gx && one.y === CURVE.gy,
+              error: "base point mismatch"
+            });
+          } catch (error) {
+            tests.push({
+              name: "P-256 scalar 1 matches base point",
+              ok: false,
+              error: error instanceof Error ? error.message : "error"
+            });
+          }
+
+          try {
+            const identity = await createIdentityFromMnemonic("anchor apron ash atlas badge beacon birch bloom brass brisk cable caper", "Test");
+            const shared = await deriveSharedSecret(identity.publicJwk, identity.agreementKey);
+            tests.push({
+              name: "ECDH derives 32-byte shared secret",
+              ok: shared.byteLength === 32,
+              error: "unexpected length"
+            });
+          } catch (error) {
+            tests.push({
+              name: "ECDH derives 32-byte shared secret",
+              ok: false,
+              error: error instanceof Error ? error.message : "error"
+            });
+          }
+
+          try {
+            const digest = await sha256Hex("mesh-chat");
+            tests.push({
+              name: "SHA-256 utility returns 64 hex chars",
+              ok: digest.length === 64,
+              error: "wrong digest length"
+            });
+          } catch (error) {
+            tests.push({
+              name: "SHA-256 utility returns 64 hex chars",
+              ok: false,
+              error: error instanceof Error ? error.message : "error"
+            });
+          }
+
+          try {
+            const recipient = await createIdentityFromMnemonic("anchor apron ash atlas badge beacon birch bloom brass brisk cable caper", "Recipient");
+            const prior = state.identity;
+            state.identity = recipient;
+            try {
+              const box = await encryptForPeer(recipient.publicJwk, "round-trip");
+              const plaintext = await decryptFromPeer(recipient.publicJwk, box);
+              tests.push({
+                name: "Direct message round-trips via ephemeral sender key",
+                ok: plaintext === "round-trip" && Boolean(box.ephemeral) && Boolean(box.salt),
+                error: "decrypt mismatch or missing FS fields"
+              });
+            } finally {
+              state.identity = prior;
+            }
+          } catch (error) {
+            tests.push({
+              name: "Direct message round-trips via ephemeral sender key",
+              ok: false,
+              error: error instanceof Error ? error.message : "error"
+            });
+          }
+
+          try {
+            const priorIdentity = state.identity;
+            const priorRegistry = state.registry;
+            state.identity = { fingerprint: "selfTestActor" };
+            state.registry = createRegistry();
+            const targetFingerprint = "ghostMember";
+            const addOp = buildAddOp({
+              fingerprint: targetFingerprint,
+              alias: "ghost",
+              publicJwk: { kty: "EC", crv: "P-256", x: "x", y: "y" },
+              joinedAt: "2026-01-01T00:00:00Z"
+            });
+            applyRegistryOp(addOp);
+            const removeOp = buildRemoveOp(targetFingerprint, [addOp.tag]);
+            applyRegistryOp(removeOp);
+            const banOp = buildBanOp(targetFingerprint, "self-test");
+            applyRegistryOp(banOp);
+            const gcOk =
+              !state.registry.adds.has(targetFingerprint) &&
+              !state.registry.removes.has(targetFingerprint) &&
+              state.registry.bans.has(targetFingerprint) &&
+              state.registry.log.every((entry) => {
+                const target = entry.member?.fingerprint || entry.memberFingerprint;
+                return target !== targetFingerprint || entry.kind === "ban";
+              });
+            tests.push({
+              name: "Ban op GCs prior adds/removes/log entries",
+              ok: gcOk,
+              error: "banned member state was not fully garbage-collected"
+            });
+            state.identity = priorIdentity;
+            state.registry = priorRegistry;
+          } catch (error) {
+            tests.push({
+              name: "Ban op GCs prior adds/removes/log entries",
+              ok: false,
+              error: error instanceof Error ? error.message : "error"
+            });
+          }
+
+          state.selfTests = tests;
+        }
+
+        async function boot() {
+          state.runtimeHash = await sha256Hex(document.documentElement.outerHTML);
+          await runSelfTests();
+          render();
+        }
+
+        void boot();
+      })();
+    </script>
+  </body>
+</html>

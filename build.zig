@@ -9,6 +9,14 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
 
+    const proxy_mod = b.addModule("ayllu-proxy", .{
+        .root_source_file = b.path("proxy/root.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "ayllu", .module = ayllu_mod },
+        },
+    });
+
     const exe = b.addExecutable(.{
         .name = "ayllu",
         .root_module = b.createModule(.{
@@ -32,10 +40,14 @@ pub fn build(b: *std.Build) void {
     const mod_tests = b.addTest(.{ .root_module = ayllu_mod });
     const run_mod_tests = b.addRunArtifact(mod_tests);
 
+    const proxy_tests = b.addTest(.{ .root_module = proxy_mod });
+    const run_proxy_tests = b.addRunArtifact(proxy_tests);
+
     const exe_tests = b.addTest(.{ .root_module = exe.root_module });
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_mod_tests.step);
+    test_step.dependOn(&run_proxy_tests.step);
     test_step.dependOn(&run_exe_tests.step);
 }
