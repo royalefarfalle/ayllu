@@ -1,6 +1,4 @@
 //! SOCKS5 protocol (RFC 1928). Pure parsers/encoders — не трогает сеть.
-//! Phase-3 scope: no-auth greeting + CONNECT request, IPv4/IPv6/domain.
-//! BIND и UDP ASSOCIATE не реализованы (не нужны для Telegram/HTTP).
 
 const std = @import("std");
 
@@ -12,14 +10,6 @@ pub const Method = enum(u8) {
     username_password = 0x02,
     no_acceptable = 0xFF,
     _,
-
-    pub fn fromByte(byte: u8) Method {
-        return @enumFromInt(byte);
-    }
-
-    pub fn toByte(self: Method) u8 {
-        return @intFromEnum(self);
-    }
 };
 
 pub const Command = enum(u8) {
@@ -51,9 +41,6 @@ pub const Reply = enum(u8) {
     command_not_supported = 0x07,
     address_type_not_supported = 0x08,
 };
-
-pub const max_methods = 255;
-pub const max_domain_len = 255;
 
 pub const DecodeError = error{
     ShortBuffer,
@@ -87,9 +74,8 @@ pub fn decodeGreeting(buf: []const u8) DecodeError!Greeting {
     };
 }
 
-/// Encodes the 2-byte greeting reply. Returns it by value (no allocation).
 pub fn encodeGreetingReply(method: Method) [2]u8 {
-    return .{ version, method.toByte() };
+    return .{ version, @intFromEnum(method) };
 }
 
 pub const Request = struct {
@@ -102,19 +88,9 @@ pub const Request = struct {
 pub fn decodeRequest(buf: []const u8) DecodeError!Request {
     if (buf.len < 4) return error.ShortBuffer;
     if (buf[0] != version) return error.BadVersion;
-    const command: Command = switch (buf[1]) {
-        0x01 => .connect,
-        0x02 => .bind,
-        0x03 => .udp_associate,
-        else => return error.BadCommand,
-    };
+    const command = std.enums.fromInt(Command, buf[1]) orelse return error.BadCommand;
     if (buf[2] != 0x00) return error.BadReserved;
-    const atyp: AddressKind = switch (buf[3]) {
-        0x01 => .ipv4,
-        0x03 => .domain,
-        0x04 => .ipv6,
-        else => return error.BadAddressType,
-    };
+    const atyp = std.enums.fromInt(AddressKind, buf[3]) orelse return error.BadAddressType;
 
     const addr_start = 4;
     var addr: Address = undefined;
@@ -190,7 +166,6 @@ pub fn replySize(address: Address) usize {
     } + 2;
 }
 
-pub const zero_ipv4_reply_size: usize = 4 + 4 + 2;
 pub const zero_ipv4: Address = .{ .ipv4 = .{ 0, 0, 0, 0 } };
 
 test "decodeGreeting single method" {
@@ -285,10 +260,7 @@ test "decodeRequest CONNECT to domain" {
     try std.testing.expectEqual(buf.len, r.bytes_consumed);
 }
 
-test "decodeRequest rejects BIND and UDP ASSOCIATE (unsupported MVP)" {
-    // Actually: phase-3 scope says we decode all commands; daemon rejects
-    // BIND/UDP at dispatch layer with command_not_supported. So decode
-    // itself must ACCEPT the byte — test that it parses the command cleanly.
+test "decodeRequest accepts BIND / UDP ASSOCIATE — dispatch layer rejects them" {
     const buf_bind = [_]u8{ 0x05, 0x02, 0x00, 0x01, 0, 0, 0, 0, 0, 0 };
     const r_bind = try decodeRequest(&buf_bind);
     try std.testing.expectEqual(Command.bind, r_bind.command);
