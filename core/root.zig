@@ -1,4 +1,4 @@
-//! ayllu — протокол устойчивой связи. Публичный модуль ядра.
+//! ayllu — resilient communication protocol. Public core module.
 
 pub const crypto = @import("crypto.zig");
 pub const identity = @import("identity.zig");

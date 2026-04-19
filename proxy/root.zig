@@ -1,9 +1,9 @@
-//! ayllu-proxy — транспортный слой прокси.
+//! ayllu-proxy — proxy transport layer.
 //!
-//! Phase-3 поставляет SOCKS5 (RFC 1928): no-auth + CONNECT, покрывает
-//! Telegram/WhatsApp/YouTube-в-браузере. Phase-5 добавит MTProto, phase-7
-//! WireGuard-over-Ayllu, phase-10 Shadowsocks. Phase-4 Reality даст
-//! DPI-маскировку поверх любого из них.
+//! Phase-3 ships SOCKS5 (RFC 1928): no-auth + CONNECT, covering
+//! Telegram/WhatsApp/YouTube-in-browser. Phase-5 adds MTProto, phase-7
+//! WireGuard-over-Ayllu, phase-10 Shadowsocks. Phase-4 Reality adds
+//! DPI camouflage on top of any of them.
 
 pub const socks5 = @import("socks5.zig");
 pub const relay = @import("relay.zig");

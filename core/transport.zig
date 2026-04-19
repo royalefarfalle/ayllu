@@ -1,8 +1,8 @@
-//! Transport — абстракция доставки envelope между узлами (tambo).
+//! Transport — abstraction for envelope delivery between nodes (tambo).
 //!
-//! Реальные транспорты (WebSocket, WireGuard, LoRa, и т.п.) приходят в
-//! следующих фазах; здесь только vtable-интерфейс + `InMemoryTransport`
-//! для тестов других модулей core/ (registry, chat).
+//! Real transports (WebSocket, WireGuard, LoRa, etc.) land in later
+//! phases; here there's only the vtable interface plus `InMemoryTransport`
+//! for tests of other core/ modules (registry, chat).
 
 const std = @import("std");
 const envelope_mod = @import("envelope.zig");

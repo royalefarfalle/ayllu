@@ -1,134 +1,132 @@
-# ayllu.sh — техническая спецификация
+# ayllu.sh — technical specification
 
-> *Ayllu* (кечуа) — андская община, основанная на взаимной поддержке и коллективном труде. Эта система наследует тот же принцип: связь через взаимопомощь узлов, а не через централизованную инфраструктуру.
+> *Ayllu* (Quechua) is an Andean community built on mutual support and collective labor. This system inherits the same principle: connectivity through cooperating nodes rather than centralized infrastructure.
 
-## Что это
+## What it is
 
-**Ayllu — протокол устойчивой связи и инфраструктурный слой для туннелирования** в условиях цензуры. Работает как собственный мессенджер и как невидимый транспорт для существующих приложений.
+**Ayllu is a censorship-resistant connectivity protocol and transport layer for tunneling** under aggressive DPI. It operates both as a standalone messenger and as an invisible transport for existing applications.
 
-Три слоя:
+Three layers:
 
-1. **PROTOCOL.md** (позже) — текстовая спецификация
-2. **ayllu-core** — reference implementation на Zig 0.16
-3. **ayllu-apps** — reference приложения:
-   - `ayllu-chat` — собственный мессенджер (async + chat-UI)
-   - `ayllu-proxy` — транспортный слой для чужих протоколов и системный VPN
+1. **PROTOCOL.md** (later) — wire-format specification
+2. **ayllu-core** — reference implementation in Zig 0.16
+3. **ayllu-apps** — reference applications:
+   - `ayllu-chat` — standalone messenger (async + chat UI)
+   - `ayllu-proxy` — transport layer for third-party protocols and a system-wide VPN
 
-## Что решает для конечного пользователя
+## Covered use cases
 
-Матрица use cases для родителей в РФ 2026:
-
-| Задача | Через что | Работает? |
+| Task | Transport | Works? |
 |---|---|---|
-| Telegram сообщения | SOCKS5 proxy | ✓ |
-| Telegram видео/аудио звонки | SOCKS5 + "Use Proxy for Calls" | ✓ (TCP fallback) |
-| Telegram встроенный браузер → YouTube | SOCKS5 | ✓ |
-| Telegram встроенный браузер → любые заблокированные | SOCKS5 | ✓ |
-| Telegram Web Apps и боты | SOCKS5 | ✓ |
-| WhatsApp | SOCKS5 (в настройках) | ✓ |
-| Системный Safari/Chrome → заблокированные сайты | WireGuard-over-Ayllu | ✓ |
-| Весь трафик телефона (iOS system VPN) | WireGuard-over-Ayllu | ✓ |
-| YouTube в нативном приложении | WireGuard-over-Ayllu | ✓ |
-| Собственный зашифрованный чат с семьёй | ayllu-chat PWA | ✓ |
-| Видеозвонки в ayllu-chat | WebRTC в PWA | ✓ |
+| Telegram messages | SOCKS5 proxy | yes |
+| Telegram voice/video calls | SOCKS5 + "Use Proxy for Calls" | yes (TCP fallback) |
+| Telegram in-app browser → YouTube | SOCKS5 | yes |
+| Telegram in-app browser → arbitrary blocked sites | SOCKS5 | yes |
+| Telegram Web Apps and bots | SOCKS5 | yes |
+| WhatsApp | SOCKS5 (in settings) | yes |
+| System Safari/Chrome → blocked sites | WireGuard-over-Ayllu | yes |
+| All device traffic (iOS system VPN) | WireGuard-over-Ayllu | yes |
+| YouTube in the native app | WireGuard-over-Ayllu | yes |
+| Standalone encrypted group chat | ayllu-chat PWA | yes |
+| Video calls inside ayllu-chat | WebRTC in the PWA | yes |
 
-**Два режима использования:**
+**Two operating modes:**
 
-1. **Точечное проксирование** через SOCKS5 — встраивается в настройки Telegram/других приложений. Работает для этих приложений и всего, что они открывают (включая встроенные браузеры).
-2. **Системный VPN** через WireGuard-over-Ayllu — весь трафик устройства идёт через Ayllu. Решает всё, включая iOS Safari.
+1. **Targeted proxying** via SOCKS5 — configured inside Telegram or any other app that accepts a proxy. Covers that app and everything it opens (including embedded browsers).
+2. **System-wide VPN** via WireGuard-over-Ayllu — all device traffic routes through Ayllu. Covers everything, including iOS Safari.
 
-Оба режима используют polymorphic camouflage — трафик невидим для DPI.
+Both modes use polymorphic camouflage: the traffic looks benign to DPI.
 
-## Позиционирование
+## Positioning
 
-| Система | Сильное | Слабое |
+| System | Strength | Weakness |
 |---|---|---|
-| Signal | E2E, UX | Централизовано, детектируется |
-| Matrix | Федерация | DPI-детект, тяжёлое |
-| Briar | P2P, deniability | Только Android, медленно |
-| Meshtastic | LoRa-mesh | Нет интернета, нет E2E-групп |
-| Tor | Анонимность | Не для чата, палится |
-| Reticulum | Transport-agnostic | Python, UX, без маскировки |
-| Xray/V2Ray | Proxy + маскировка | Go палится, нет чата |
+| Signal | E2E, UX | Centralized, detectable |
+| Matrix | Federation | DPI-detectable, heavyweight |
+| Briar | P2P, deniability | Android-only, slow |
+| Meshtastic | LoRa mesh | No internet, no E2E groups |
+| Tor | Anonymity | Not for chat, detectable |
+| Reticulum | Transport-agnostic | Python, UX, no camouflage |
+| Xray/V2Ray | Proxy + camouflage | Go fingerprints, no chat |
 
-**Ayllu = Reticulum + Reality + современный UX + proxy-платформа + polymorphic protocol.**
+**Ayllu = Reticulum + Reality + modern UX + proxy platform + polymorphic protocol.**
 
-## Почему Zig 0.16
+## Why Zig 0.16
 
-- **`Io` как абстракция**: каждый транспорт — реализация одного интерфейса
-- **Отмена операций встроена**: параллельные попытки с автоотменой
-- **`std.crypto` cutting-edge**: Ed25519, Curve25519, AES-GCM-SIV
-- **Статический бинарник 500 КБ — 2 МБ**
-- **Не палится DPI**: полный контроль над байтами, без runtime-сигнатур Go/Python
-- **Один код — все платформы**: io_uring, Termux, ESP32
+- **`Io` as abstraction**: every transport is an implementation of the same interface.
+- **Cancellation is built in**: parallel attempts with automatic cancellation of the losers.
+- **`std.crypto` is cutting-edge**: Ed25519, Curve25519, AES-GCM-SIV.
+- **Static binary of 500 KB to 2 MB.**
+- **No runtime fingerprint**: full byte-level control, unlike Go/Python stacks.
+- **One codebase, every platform**: io_uring, Termux, ESP32.
 
-## Архитектура
+## Architecture
 
-### Async-first ядро с chat-like UI
+### Async-first core with a chat-like UI
 
-**Под капотом:** store-and-forward. Envelope с ID, TTL, криптографией.
+**Under the hood:** store-and-forward. Envelopes with an ID, TTL, and cryptographic framing.
 
-**В UI:** пузырьки чата, timestamps, статусы доставки, прозрачная индикация режима.
+**In the UI:** chat bubbles, timestamps, delivery status, transparent mode indication.
 
-**Live-режим:** WebRTC только когда оба онлайн через быстрый транспорт.
+**Live mode:** WebRTC opened only when both peers are online via a fast transport.
 
-### Ayllu как платформа прокси и VPN
+### Ayllu as a proxy and VPN platform
 
-- **MTProto proxy** — Telegram через `ayllu.sh:443`
-- **SOCKS5** — универсальный для любого приложения (TCP + UDP через extensions)
-- **Shadowsocks-over-Ayllu** — миграция с SS-клиентов
-- **WireGuard-over-Ayllu** — системный VPN, весь трафик телефона
+- **MTProto proxy** — Telegram over `ayllu.sh:443`.
+- **SOCKS5** — universal, works for any app (TCP + UDP through extensions).
+- **Shadowsocks-over-Ayllu** — migration path for existing SS clients.
+- **WireGuard-over-Ayllu** — system-wide VPN, routes all device traffic.
 
-Весь прокси-трафик маскируется через polymorphic protocol. DPI видит обычный HTTPS к безобидному сайту.
+All proxy traffic is camouflaged through the polymorphic protocol. DPI sees ordinary HTTPS to an innocuous site.
 
-### Polymorphic protocol — cutting-edge цель
+### Polymorphic protocol — the cutting-edge goal
 
-**Трёхфазный handshake с camouflage и pivot:**
+**Three-phase handshake with camouflage and pivot:**
 
-**Фаза 1 — camouflage:** сервер отвечает на TLS ClientHello как whitelisted-сайт (Microsoft, CloudFlare, госуслуги). Сертификат настоящий через Reality. DPI видит whitelisted-трафик.
+**Phase 1 — camouflage:** the server answers a TLS ClientHello as if it were a whitelisted site (a major CDN, a cloud provider, or any other allowlisted target). The certificate is genuine via Reality. DPI sees whitelisted traffic.
 
-**Фаза 2 — secret handshake:** клиент посылает криптографический токен, замаскированный под обычный HTTP-запрос. Time-based, replay невозможен.
+**Phase 2 — secret handshake:** the client sends a cryptographic token disguised as an ordinary HTTP request. Time-based, not replayable.
 
-**Фаза 3 — pivot:** сервер распознаёт токен → переключается на Ayllu-транспорт. Неправильный токен → продолжает честно проксировать к target-домену (активное зондирование DPI возвращает настоящий контент).
+**Phase 3 — pivot:** the server recognizes the token and switches to the Ayllu transport. If the token is wrong, the server transparently proxies to the cover domain (so an active-probing DPI sees real content from a real site).
 
-**Polymorphic-расширение:**
+**Polymorphic extensions:**
 
-- **Multi-site camouflage**: ротация между whitelist-доменами
-- **Protocol shape-shifting**: HTTPS/2 → HTTP/3 QUIC → WebSocket к Discord, внутри одно, снаружи разное
-- **Cover traffic**: fake-запросы, имитирующие обычный серфинг
-- **Time-keyed tokens**: handshake-токены устаревают за секунды
+- **Multi-site camouflage**: rotation across a pool of whitelisted cover domains.
+- **Protocol shape-shifting**: HTTPS/2 → HTTP/3 QUIC → WebSocket to commonly used services; same inner protocol, different outer shape.
+- **Cover traffic**: synthetic requests that mimic ordinary browsing.
+- **Time-keyed tokens**: handshake tokens expire within seconds.
 
-**Никто серьёзно не делал polymorphic protocol для mesh-систем.** Zig 0.16 даёт полный контроль над байтами.
+**No one has seriously built a polymorphic protocol for mesh systems.** Zig 0.16 gives the byte-level control needed for it.
 
-## Структура репозитория
+## Repository layout
 
 ```
 ayllu.sh/
 ├── SPEC.md
-├── PROTOCOL.md                # позже
-├── core/                      # ~3000 строк
+├── PROTOCOL.md                # later
+├── core/                      # ~3000 lines
 │   ├── crypto.zig
 │   ├── identity.zig
 │   ├── envelope.zig
 │   ├── transport.zig
 │   └── registry.zig
-├── chat/                      # ~3000 строк
+├── chat/                      # ~3000 lines
 │   ├── server.zig
 │   ├── signaling.zig
 │   └── web/
 │       └── index.html
-├── proxy/                     # ~4000 строк
+├── proxy/                     # ~4000 lines
 │   ├── socks5.zig
 │   ├── mtproto.zig
 │   ├── shadowsocks.zig
-│   └── wireguard.zig          # системный VPN
-├── camouflage/                # ~3000 строк
+│   └── wireguard.zig          # system-wide VPN
+├── camouflage/                # ~3000 lines
 │   ├── reality.zig
 │   ├── multi_site.zig
 │   ├── shape_shift.zig
 │   ├── cover_traffic.zig
 │   └── tokens.zig
-├── mesh/                      # ~10000 строк, позже
+├── mesh/                      # ~10000 lines, later
 │   ├── node.zig
 │   ├── routing.zig
 │   ├── discovery.zig
@@ -138,11 +136,11 @@ ayllu.sh/
 └── build.zig
 ```
 
-## Общее ядро (`core/`)
+## Shared core (`core/`)
 
-- **`crypto.zig`** — обёртки над `std.crypto`
-- **`identity.zig`** — Ed25519 + Curve25519, fingerprint, multi-device
-- **`envelope.zig`** — формат:
+- **`crypto.zig`** — wrappers over `std.crypto`.
+- **`identity.zig`** — Ed25519 + Curve25519, fingerprint, multi-device.
+- **`envelope.zig`** — format:
   ```
   Envelope = {
     version: u8,
@@ -156,106 +154,106 @@ ayllu.sh/
     signature: [64]u8,
   }
   ```
-- **`transport.zig`** — абстракция через `Io`
-- **`registry.zig`** — CRDT для групп
+- **`transport.zig`** — abstraction over `Io`.
+- **`registry.zig`** — CRDT for groups.
 
 ## ayllu-chat
 
-**Модель угроз:** РФ/Иран 2026. Не защищаемся от адресной атаки, тотального отключения, изъятия устройств.
+**Threat model:** aggressive state DPI of the kind routinely deployed to block Telegram, WhatsApp, independent media, Tor, and WireGuard. We do not defend against targeted attacks, total network shutdowns, or physical device seizure.
 
-- Сервер: Zig на VPS в спокойной юрисдикции
-- Клиент: PWA из прототипа с заменой P2P на async HTTP
-- Маскировка: polymorphic protocol
+- Server: Zig on a VPS in a calm jurisdiction.
+- Client: PWA derived from the prototype, with P2P swapped for async HTTP.
+- Camouflage: the polymorphic protocol.
 
 ## ayllu-proxy
 
-- **`socks5.zig`** — универсальный, первый приоритет (покрывает Telegram полностью)
-- **`mtproto.zig`** — native Telegram proxy
-- **`shadowsocks.zig`** — миграция с SS
-- **`wireguard.zig`** — системный VPN для iOS Safari и всего остального
+- **`socks5.zig`** — universal, first priority (covers Telegram completely).
+- **`mtproto.zig`** — native Telegram proxy.
+- **`shadowsocks.zig`** — SS migration path.
+- **`wireguard.zig`** — system-wide VPN for iOS Safari and everything else.
 
 ## camouflage/ — polymorphic protocol
 
-- **`reality.zig`** — базовая Reality (порт с Go/Xray)
-- **`multi_site.zig`** — ротация camouflage-доменов
-- **`shape_shift.zig`** — смена внешней сигнатуры
-- **`cover_traffic.zig`** — фоновая активность
-- **`tokens.zig`** — time-keyed handshake
+- **`reality.zig`** — Reality baseline (port from Go/Xray).
+- **`multi_site.zig`** — rotation across camouflage domains.
+- **`shape_shift.zig`** — outer-signature mutation.
+- **`cover_traffic.zig`** — background activity.
+- **`tokens.zig`** — time-keyed handshake.
 
-## Фазы разработки
+## Development phases
 
-| Фаза | Строк Zig | Что даёт пользователю |
+| Phase | Zig lines | User-visible outcome |
 |------|-----------|----------------------|
-| 1. core/ | ~3000 | Протокол готов |
-| 2. chat базовый | +2000 | Семейный чат работает |
-| 3. proxy: SOCKS5 | +800 | Telegram полностью работает (сообщения, звонки, YouTube в браузере) |
-| 4. camouflage: Reality | +2500 | Трафик невидим для DPI |
-| 5. proxy: MTProto | +1000 | Нативный Telegram proxy |
-| 6. chat видео | +1000 | Звонки в семейном чате |
-| 7. proxy: WireGuard | +2200 | Системный VPN, решает всё включая iOS Safari |
-| 8. camouflage: multi-site | +1000 | Ротация доменов |
-| 9. camouflage: shape-shift | +1500 | Смена протокола |
-| 10. proxy: Shadowsocks | +700 | SS-миграция |
-| 11. camouflage: cover traffic | +500 | Фоновая активность |
-| 12. chat зеркала | +500 | Резервные домены |
-| 13. mesh базовый | +5000 | Многоузловая маршрутизация |
-| 14. mesh транспорты | +3000 | LoRa, APRS |
-| 15. mesh анонимность | +2000 | Onion, MLS |
+| 1. core/ | ~3000 | Protocol ready |
+| 2. basic chat | +2000 | Standalone group chat works |
+| 3. proxy: SOCKS5 | +800 | Telegram fully works (messages, calls, YouTube in the in-app browser) |
+| 4. camouflage: Reality | +2500 | Traffic invisible to DPI |
+| 5. proxy: MTProto | +1000 | Native Telegram proxy |
+| 6. chat video | +1000 | Calls inside the standalone chat |
+| 7. proxy: WireGuard | +2200 | System-wide VPN, covers iOS Safari |
+| 8. camouflage: multi-site | +1000 | Domain rotation |
+| 9. camouflage: shape-shift | +1500 | Protocol mutation |
+| 10. proxy: Shadowsocks | +700 | SS migration |
+| 11. camouflage: cover traffic | +500 | Background activity |
+| 12. chat mirrors | +500 | Fallback domains |
+| 13. mesh baseline | +5000 | Multi-hop routing |
+| 14. mesh transports | +3000 | LoRa, APRS |
+| 15. mesh anonymity | +2000 | Onion, MLS |
 
-**Эссеншиал (chat + SOCKS5 + Reality): ~8300 строк.** Этого уже хватит для: семейного чата + Telegram работает полностью + невидимый трафик.
+**Essential (chat + SOCKS5 + Reality): ~8300 lines.** Enough for a standalone group chat plus fully working Telegram plus invisible traffic.
 
-**С WireGuard (фаза 7): +2200 = ~10500 строк.** Полное решение для iOS.
+**With WireGuard (phase 7): +2200 = ~10500 lines.** Complete iOS story.
 
-**С polymorphic расширением: +3000 = ~13500 строк.** Cutting-edge маскировка.
+**With polymorphic extensions: +3000 = ~13500 lines.** Cutting-edge camouflage.
 
-**Полная с mesh: ~24500 строк.**
+**Full with mesh: ~24500 lines.**
 
-**Начинать с фаз 1+2+3.** Core + минимальный chat + SOCKS5. Родители получают рабочий Telegram + свой семейный чат. Этого уже много.
+**Start with phases 1 + 2 + 3.** Core plus minimal chat plus SOCKS5. Users get a working Telegram plus a standalone group chat. That is already a lot.
 
-Дальше — Reality (фаза 4) для устойчивости, WireGuard (фаза 7) для iOS Safari, polymorphic (8-9) для будущего.
+After that: Reality (phase 4) for robustness, WireGuard (phase 7) for iOS Safari, polymorphic layers (8–9) for longer-term survivability.
 
-## Принципы
+## Principles
 
-- Эссеншиал ≤ 15000 строк Zig
-- Максимум из `std.crypto`, `std.http`, `std.Io`
-- Приватные ключи не покидают устройство
-- Только стандарты: Ed25519, Curve25519, AES-GCM-SIV, Noise, MLS
-- Весь код читается за неделю
-- Тесты 1:1, для крипто 2:1
+- Essential surface ≤ 15000 lines of Zig.
+- Maximum use of `std.crypto`, `std.http`, `std.Io`.
+- Private keys never leave the device.
+- Only standards: Ed25519, Curve25519, AES-GCM-SIV, Noise, MLS.
+- The entire codebase is readable in a week.
+- Tests 1:1, 2:1 for crypto.
 
-## Переиспользуется из прототипа
+## Reused from the prototype
 
-- Envelope-формат → `core/envelope.zig`
-- Registry CRDT → `core/registry.zig`
-- UX (panic-wipe, auto-wipe, passphrase-lock, self-tests) → `chat/web/`
-- PWA-структура → `chat/web/index.html`
+- Envelope format → `core/envelope.zig`.
+- Registry CRDT → `core/registry.zig`.
+- UX (panic-wipe, auto-wipe, passphrase lock, self-tests) → `chat/web/`.
+- PWA structure → `chat/web/index.html`.
 
-## Cutting-edge стек
+## Cutting-edge stack
 
-- **Zig 0.16** — transport-agnostic без runtime-сигнатур
-- **Noise Protocol** — как в WireGuard
-- **MLS (RFC 9420)** — новее Double Ratchet
-- **Reality + polymorphic** — state-of-the-art маскировка
-- **AES-GCM-SIV** — misuse-resistant
-- **io_uring** — минимальная задержка
+- **Zig 0.16** — transport-agnostic, no runtime fingerprints.
+- **Noise Protocol** — same lineage as WireGuard.
+- **MLS (RFC 9420)** — newer than Double Ratchet.
+- **Reality + polymorphic** — state-of-the-art camouflage.
+- **AES-GCM-SIV** — misuse-resistant.
+- **io_uring** — minimal latency.
 
-## Терминология
+## Terminology
 
-- *ayllu* — сеть
-- *quipu* (кипу) — envelope
-- *runa* — идентичность
-- *tambo* — узел
+- *ayllu* — the network
+- *quipu* — envelope
+- *runa* — identity
+- *tambo* — node
 
-## Открытые вопросы
+## Open questions
 
-1. Мнемоника: BIP39 или свой словарь?
-2. iOS: PWA или AltStore?
-3. TTL-политика?
-4. Meshtastic: Protobuf или своя обёртка?
-5. WireGuard-over-Ayllu: подменяем обычный WG или свой собственный протокол?
-6. Camouflage-домены по умолчанию?
-7. Shape-shifting: какие протоколы в первом релизе?
+1. Mnemonic encoding: BIP39 or a custom wordlist?
+2. iOS distribution: PWA or AltStore?
+3. TTL policy?
+4. Meshtastic: Protobuf or a custom wrapper?
+5. WireGuard-over-Ayllu: wrap stock WG or ship a bespoke protocol?
+6. Default camouflage domains?
+7. Shape-shifting: which outer protocols ship in the first release?
 
 ---
 
-**Статус:** v0.5. Добавлена матрица use cases, WireGuard приоритизирован выше (фаза 7, не "позже"). Эссеншиал с SOCKS5 достаточен для полного обхода в Telegram. WireGuard закрывает iOS Safari и системный трафик.
+**Status:** v0.5. Use-case matrix added; WireGuard promoted (phase 7, no longer "later"). Essential set with SOCKS5 is sufficient for full coverage inside Telegram. WireGuard closes iOS Safari and system-wide traffic.

@@ -1,4 +1,4 @@
-//! SOCKS5 protocol (RFC 1928). Pure parsers/encoders — не трогает сеть.
+//! SOCKS5 protocol (RFC 1928). Pure parsers/encoders — does not touch the network.
 
 const std = @import("std");
 

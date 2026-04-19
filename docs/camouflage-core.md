@@ -1,15 +1,15 @@
 # Camouflage Core Status
 
-Этот пакет уже не пустой, но важно честно фиксировать его границы.
+This package is no longer empty, but its boundaries need to stay explicit.
 
-Если нужен уже runnable путь "локальный bridge -> camouflage gateway ->
-inner SOCKS5", см. `docs/camouflage-runtime.md`.
+If you want a runnable "local bridge -> camouflage gateway -> inner SOCKS5"
+path today, see `docs/camouflage-runtime.md`.
 
-## Что уже реализовано
+## What is already implemented
 
 - `camouflage/reality.zig`
   - X25519 key handling
-  - `shortId` parsing/validation
+  - `shortId` parsing / validation
   - `serverName` / version / time-window checks
   - derivation of admission material (`auth_key`, `response_seed`)
 
@@ -20,25 +20,27 @@ inner SOCKS5", см. `docs/camouflage-runtime.md`.
   - replay cache
 
 - `camouflage/pivot.zig`
-  - parsing of HTTP-like request head
-  - extraction of `Host` and token header
+  - parsing of an HTTP-like request head
+  - extraction of `Host` and the token header
   - decision: `pivot` or honest `fallback`
 
-## Что это означает practically
+## What this means in practice
 
-Теперь в проекте есть нормальное ядро для схемы:
+The project now has a proper core for the following scheme:
 
-1. внешний TLS-похожий вход
+1. an outer TLS-looking entry point
 2. Reality admission
-3. disguised HTTP request with token
-4. `pivot` в Ayllu transport
+3. a disguised HTTP request carrying the token
+4. `pivot` into the Ayllu transport
 5. invalid token -> honest fallback
 
-## Чего пока ещё нет
+## What is still missing
 
-- нет реального TLS/REALITY listener-а на сокете;
-- нет bridge-кода, который после `pivot` переключает поток в `proxy/daemon`;
-- нет честного upstream fallback к реальному сайту;
-- нет cover-traffic / multi-site / shape-shift.
+- there is no real TLS/REALITY listener on the socket;
+- there is no bridge code that, after `pivot`, hands the stream to
+  `proxy/daemon`;
+- there is no honest upstream fallback to a real site;
+- there is no cover-traffic / multi-site / shape-shift yet.
 
-То есть это уже **camouflage core**, но ещё не **camouflage transport runtime**.
+In other words, this is already **camouflage core**, but not yet
+**camouflage transport runtime**.

@@ -1,9 +1,9 @@
-//! Identity (runa) — долгоживущая криптографическая идентичность узла.
+//! Identity (runa) — the long-lived cryptographic identity of a node.
 //!
-//! Состоит из Ed25519-ключа для подписей и X25519-ключа для DH, причём
-//! X25519 выводится из того же Ed25519 seed через `fromEd25519` — это
-//! означает, что мы храним ровно один источник секрета и не можем случайно
-//! получить рассогласованную пару.
+//! Holds an Ed25519 key for signatures and an X25519 key for DH, where
+//! X25519 is derived from the same Ed25519 seed via `fromEd25519`. That
+//! means exactly one secret source is stored, and we can't accidentally
+//! end up with a mismatched pair.
 
 const std = @import("std");
 const crypto = @import("crypto.zig");
@@ -112,7 +112,7 @@ test "generate produces distinct identities" {
 test "sign and verify roundtrip" {
     const io = std.testing.io;
     const id = try Identity.generate(io);
-    const msg = "привет, ayllu";
+    const msg = "hello, ayllu";
     const sig = try id.sign(msg);
     try sig.verify(msg, id.ed25519.public_key);
 }

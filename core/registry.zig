@@ -1,11 +1,11 @@
-//! Registry — CRDT для членства в группах (OR-Set).
+//! Registry — CRDT for group membership (OR-Set).
 //!
-//! Каждое add-событие уникально идентифицируется `event_id` (16 байт, такой
-//! же формы, как envelope.Id — эти события передаются в payload конвертов).
-//! Remove-событие несёт `target_event_id` и гасит соответствующий add.
-//! Phase-1 scope: локальный инвентарь. Подпись/авторизация событий —
-//! ответственность вышележащего слоя (phase-2 chat); поэтому здесь нет
-//! поля `actor` — пока некому его читать.
+//! Each add event is uniquely identified by `event_id` (16 bytes, same
+//! shape as envelope.Id — these events travel in envelope payloads).
+//! A remove event carries `target_event_id` and cancels the matching add.
+//! Phase-1 scope: local inventory. Event signing/authorization is the
+//! responsibility of a higher layer (phase-2 chat); hence no `actor`
+//! field here — nothing reads it yet.
 
 const std = @import("std");
 const crypto = @import("crypto.zig");

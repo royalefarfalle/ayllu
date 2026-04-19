@@ -1,118 +1,122 @@
 # Phase 3 Proxy Ops
 
-Это заметка не про "будущий красивый Ayllu", а про то, что уже можно
-развернуть сейчас и что пока ещё НЕ спрятано.
+These are operational notes for what can be deployed *today*, not a preview of
+the future full Ayllu stack. They also flag what is still visible on the wire
+and therefore not yet safe against sophisticated DPI.
 
-## Что готово сейчас
+## What is ready now
 
-- `ayllu-proxy` поднимает обычный SOCKS5 TCP proxy.
-- Поддержан `CONNECT` для IPv4, IPv6 и доменных имён.
-- Есть приватный режим через RFC 1929 (`username:password`).
-- Есть сквозные тесты:
-  - без авторизации;
-  - с авторизацией;
-  - реальная прокладка байтов до upstream-сервера.
+- `ayllu-proxy` stands up a plain SOCKS5 TCP proxy.
+- `CONNECT` is supported for IPv4, IPv6, and domain-name targets.
+- Private mode is available via RFC 1929 (`username:password`).
+- End-to-end tests cover:
+  - unauthenticated operation;
+  - authenticated operation;
+  - real byte relay to an upstream server.
 
-## Что НЕ готово сейчас
+## What is NOT ready now
 
-- Нет Reality.
-- Нет camouflage / polymorphic handshake.
-- Нет TLS-маскировки.
-- Нет `UDP ASSOCIATE`.
-- Нет MTProto.
-- Нет WireGuard-over-Ayllu.
-- Нет multi-hop / mesh.
+- No Reality.
+- No camouflage / polymorphic handshake.
+- No TLS camouflage.
+- No `UDP ASSOCIATE`.
+- No MTProto.
+- No WireGuard-over-Ayllu.
+- No multi-hop / mesh.
 
-Итог: текущая фаза — это хороший приватный SOCKS5 relay, но ещё не
-"невидимый транспорт".
+In short: the current phase is a solid private SOCKS5 relay, not yet an
+"invisible transport".
 
-## Что такое VPS в этой фазе
+## What a VPS is in this phase
 
-VPS здесь — это просто удалённый сервер с публичным IP-адресом, который
-всегда онлайн.
+A VPS here is simply a remote server with a public IP that stays online.
 
-Текущий путь трафика такой:
+The current traffic path is:
 
-1. Telegram у родителей открывает TCP-соединение до твоего VPS.
-2. На VPS слушает `ayllu-proxy`.
-3. Telegram говорит с ним по SOCKS5.
-4. `ayllu-proxy` сам подключается к нужному сайту или сервису.
-5. Ответ возвращается назад через тот же VPS.
+1. The client (any SOCKS5-capable app, e.g. Telegram) opens a TCP connection
+   to the VPS.
+2. `ayllu-proxy` is listening on the VPS.
+3. The client speaks SOCKS5 to it.
+4. `ayllu-proxy` opens its own connection to the target site or service.
+5. The response travels back through the same VPS.
 
-То есть сейчас это "удалённый приватный proxy", а не camouflage-система.
+At this stage it is a remote private proxy, not a camouflage system.
 
-## Как это разворачивать сейчас
+## How to deploy it today
 
-Минимально нормальная схема для семьи:
+The minimal sane shape for a single operator serving a small trusted group:
 
-- один отдельный VPS;
-- один отдельный порт под `ayllu-proxy`;
-- обязательная авторизация через `--auth-file`;
-- firewall открыт только на нужный TCP-порт;
-- никакого публичного "open proxy" без пароля.
+- one dedicated VPS;
+- one dedicated port for `ayllu-proxy`;
+- mandatory authentication via `--auth-file`;
+- firewall open only on the chosen TCP port;
+- never a public "open proxy" without a password.
 
-Пример auth-файла:
+Example auth file:
 
 ```text
 alice:very-long-random-password
 ```
 
-Пример запуска:
+Example launch:
 
 ```bash
 zig build run-proxy -- --listen 0.0.0.0:1080 --auth-file /etc/ayllu/auth.txt
 ```
 
-Если хочется слушать на `443`, это возможно, но важно понимать ограничение:
-снаружи это всё ещё raw SOCKS5, а не HTTPS.
+Listening on `443` is possible, but note the constraint below: from the
+outside it is still raw SOCKS5, not HTTPS.
 
-## Важное ограничение по порту 443
+## Important limitation of port 443
 
-Raw SOCKS5 на `443` нельзя честно "спрятать" за SNI-routing в `nginx-stream`.
+Raw SOCKS5 on `443` cannot honestly be hidden behind SNI-based routing in
+`nginx-stream`.
 
-Причина простая:
+Reason:
 
-- SNI работает только когда клиент сначала шлёт TLS ClientHello;
-- SOCKS5 клиент TLS ClientHello не шлёт;
-- значит, SNI-маршрутизатору просто не на что смотреть.
+- SNI only works once the client sends a TLS ClientHello;
+- a SOCKS5 client never sends a TLS ClientHello;
+- so the SNI router has nothing to look at.
 
-Практический вывод:
+Practical conclusions:
 
-- либо отдельный IP/порт под plain SOCKS5;
-- либо ждать слой Reality/camouflage, который сам будет принимать первые
-  байты как TLS-похожий трафик.
+- either dedicate a separate IP / port to plain SOCKS5;
+- or wait for the Reality / camouflage layer, which itself accepts the first
+  bytes as TLS-shaped traffic.
 
-## Что обязательно делать до публичного использования
+## Pre-flight checklist before any public exposure
 
-- всегда включать `--auth-file`;
-- использовать длинный случайный пароль, а не человеческое слово;
-- не логировать секреты;
-- не поднимать proxy без лимитов доступа "на весь интернет";
-- отдельно проверить reconnect и неверный пароль.
+- always enable `--auth-file`;
+- use a long random password, not a human word;
+- do not log secrets;
+- never run the proxy with no access limits on the open internet;
+- explicitly test reconnect and wrong-password behaviors.
 
-## Ручная проверка перед выдачей родителям
+## Manual verification before handing credentials to a user
 
 1. `zig build test`
 2. `zig build`
-3. Поднять сервер с `--auth-file`
-4. Подключить Telegram Desktop через SOCKS5
-5. Проверить:
-   - обычные сообщения;
-   - отправку фото/видео;
-   - встроенный браузер;
-   - неправильный пароль;
-   - переподключение после разрыва сети
+3. Start the server with `--auth-file`.
+4. Connect a SOCKS5-capable client (Telegram Desktop is a convenient one).
+5. Check:
+   - regular messages;
+   - photo / video uploads;
+   - the in-app browser;
+   - wrong-password behavior;
+   - reconnect after a network drop.
 
-## Что нужно для перехода к Reality / camouflage
+## What the Reality / camouflage transition requires
 
-Перед фазой маскировки должны быть заранее определены:
+Before the camouflage layer lands, the following decisions must be pinned down:
 
-- какой внешний домен/набор доменов будет изображаться;
-- будет ли отдельный IP под camouflage;
-- какой fallback допустим при неверном токене;
-- где проходит граница между "настоящим сайтом" и Ayllu transport;
-- как проверять, что probing не получает явный SOCKS fingerprint.
+- which external domain (or set of domains) is impersonated;
+- whether a dedicated IP is used for camouflage;
+- what fallback is acceptable on an invalid token;
+- where the boundary between "real site" and Ayllu transport lies;
+- how to confirm that active probing never receives an obvious SOCKS
+  fingerprint.
 
-Пока этого слоя нет, честное описание системы такое:
+Until that layer exists, an honest description of the system is:
 
-> приватный SOCKS5 relay для семьи, но ещё не DPI-stealth transport.
+> a private SOCKS5 relay for a small trusted group, not yet a DPI-stealth
+> transport.

@@ -1,9 +1,9 @@
-//! Envelope (quipu) — атомарная единица ayllu-трафика.
+//! Envelope (quipu) — the atomic unit of ayllu traffic.
 //!
-//! Содержит всё, что нужно любому узлу, чтобы принять решение о
-//! пересылке/приёмке: версия протокола, идентификатор, отправитель,
-//! получатель, срок жизни и подписанный payload. Версия и domain-тег в
-//! digest'е — строгие: любое изменение формы digest'а требует bump.
+//! Carries everything any node needs to decide whether to forward/accept:
+//! protocol version, id, sender, recipient, lifetime, and a signed payload.
+//! The version and the domain tag in the digest are strict — any change to
+//! the digest shape requires a version bump.
 
 const std = @import("std");
 const crypto = @import("crypto.zig");
@@ -14,9 +14,9 @@ pub const current_version: u8 = 1;
 pub const id_length = 16;
 pub const Id = [id_length]u8;
 
-// Domain-тег держит digest envelope'а отдельно от любого другого
-// SHA-256-пространства в проекте (fingerprint, session id, будущие
-// производные). Любое изменение формы digest'а → bump на v2.
+// Domain tag keeps the envelope digest separate from any other
+// SHA-256 space in the project (fingerprint, session id, future
+// derivatives). Any change to the digest shape -> bump to v2.
 const digest_domain = "ayllu.env.v1";
 
 pub const Target = union(enum) {

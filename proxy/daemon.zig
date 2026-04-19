@@ -1,7 +1,7 @@
-//! SOCKS5 handshake + per-session orchestration (pure над std.Io.Reader/
-//! Writer). Серверный loop с accept и DNS живёт в proxy/main.zig; здесь
-//! только протокольная логика, которую удобно тестировать на fixed-streams
-//! без сети.
+//! SOCKS5 handshake + per-session orchestration (pure over std.Io.Reader/
+//! Writer). The server loop with accept and DNS lives in proxy/main.zig;
+//! here there's only protocol logic, convenient to test on fixed-streams
+//! without the network.
 
 const std = @import("std");
 const socks5 = @import("socks5.zig");
@@ -21,9 +21,9 @@ pub const RequestError = socks5.DecodeError || std.Io.Reader.Error;
 
 pub const HandshakeError = GreetingError || RequestError;
 
-/// Читает greeting, шлёт greeting-reply (no-auth либо no-acceptable), читает
-/// CONNECT-запрос. Возвращает распарсенный Request. Клиентский писатель уже
-/// отфлашен; следующий `encodeReply` даёт сразу отправить ответ на CONNECT.
+/// Reads greeting, sends greeting-reply (no-auth or no-acceptable), reads the
+/// CONNECT request. Returns the parsed Request. The client writer is already
+/// flushed; the next `encodeReply` lets you ship the CONNECT reply right away.
 pub fn handshake(
     client_r: *std.Io.Reader,
     client_w: *std.Io.Writer,
@@ -40,16 +40,17 @@ pub fn handshakeWithConfig(
     return try readRequest(client_r);
 }
 
-/// Готовит SOCKS5-сессию на уровне greeting/method negotiation.
+/// Prepares a SOCKS5 session at the greeting/method-negotiation level.
 ///
-/// Важное свойство для anti-probing: если первый пакет не похож на SOCKS5,
-/// функция падает молча и вызывающий должен закрыть сокет без ответа.
+/// Important property for anti-probing: if the first packet doesn't look
+/// like SOCKS5, the function fails silently and the caller must close the
+/// socket without a reply.
 pub fn negotiateMethod(
     client_r: *std.Io.Reader,
     client_w: *std.Io.Writer,
     config: Config,
 ) GreetingError!void {
-    // Greeting: 2 заголовочных байта + nmethods.
+    // Greeting: 2 header bytes + nmethods.
     const header = try client_r.peek(2);
     if (header[0] != socks5.version) return error.BadVersion;
     const nmethods = header[1];
@@ -85,7 +86,7 @@ pub fn negotiateMethod(
     }
 }
 
-/// Читает и декодирует SOCKS5 request уже после успешного method negotiation.
+/// Reads and decodes the SOCKS5 request after method negotiation succeeded.
 pub fn readRequest(client_r: *std.Io.Reader) RequestError!socks5.Request {
     // Request: VER CMD RSV ATYP (4) + variable addr + port (2).
     const req_head = try client_r.peek(4);
@@ -127,8 +128,8 @@ fn authenticateUsernamePassword(
     return ok;
 }
 
-/// Кодирует и отправляет reply на CONNECT; используется и при успехе, и
-/// при любой ошибке (daemon'у нужно уведомить клиента перед закрытием).
+/// Encodes and sends the CONNECT reply; used on success and on any error
+/// (the daemon has to notify the client before closing).
 pub fn sendReply(
     client_w: *std.Io.Writer,
     reply: socks5.Reply,
@@ -197,9 +198,9 @@ fn connectUpstream(io: std.Io, address: socks5.Address, port: u16) !std.Io.net.S
     }
 }
 
-/// Полный жизненный цикл одного клиентского SOCKS5-соединения: handshake →
-/// connect upstream → reply → bidirectional relay → close. Даёт ошибку
-/// обратно наверх, но сам закрывает оба сокета, чтобы клиент не зависал.
+/// Full lifecycle of one client SOCKS5 connection: handshake ->
+/// connect upstream -> reply -> bidirectional relay -> close. Propagates
+/// the error upward but closes both sockets itself so the client doesn't hang.
 pub fn session(io: std.Io, client_socket: std.Io.net.Socket) !void {
     return sessionWithConfig(io, client_socket, .{});
 }

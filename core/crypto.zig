@@ -1,6 +1,6 @@
-//! Обёртки над `std.crypto`. Единственное место, где ядро трогает std.crypto
-//! напрямую — дальше по проекту все primitives импортируются отсюда, чтобы
-//! замена (например, на hybrid-KEM в фазе post-quantum) была локальной.
+//! Wrappers over `std.crypto`. The only place the core touches std.crypto
+//! directly — downstream, every primitive is imported from here so that
+//! swapping one out (e.g. for a hybrid-KEM in a post-quantum phase) stays local.
 
 const std = @import("std");
 
@@ -11,10 +11,10 @@ pub const Sha256 = std.crypto.hash.sha2.Sha256;
 pub const fingerprint_length = Sha256.digest_length;
 pub const Fingerprint = [fingerprint_length]u8;
 
-// Связывает это хэш-пространство с «peer-fingerprint v1» и отделяет его
-// от любого другого SHA-256(32||32) в проекте. Менять ТОЛЬКО вместе с
-// миграцией всех существующих peer id — golden vector ниже заставит
-// подумать дважды.
+// Binds this hash space to "peer-fingerprint v1" and separates it from
+// any other SHA-256(32||32) in the project. Change ONLY together with a
+// migration of all existing peer ids — the golden vector below will make
+// you think twice.
 const fingerprint_domain = "ayllu.fp.v1";
 
 pub fn fingerprint(

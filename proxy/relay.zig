@@ -1,12 +1,12 @@
-//! Relay — пересылает байты между двумя std.Io-потоками. В SOCKS5-daemon'е
-//! вызывается после успешного handshake: client <-> upstream.
+//! Relay — forwards bytes between two std.Io streams. In the SOCKS5 daemon
+//! it's called after a successful handshake: client <-> upstream.
 
 const std = @import("std");
 
 pub const PipeError = std.Io.Reader.StreamRemainingError || std.Io.Writer.Error;
 
-/// Качает всё, что может прочитать src, в dst до EOF, затем флашит dst.
-/// Возвращает число прокачанных байт.
+/// Pumps everything src can read into dst until EOF, then flushes dst.
+/// Returns the number of bytes pumped.
 pub fn pipeAll(src: *std.Io.Reader, dst: *std.Io.Writer) PipeError!usize {
     var total: usize = 0;
     while (true) {
@@ -27,10 +27,10 @@ pub const Stream = struct {
     net_stream: ?*const std.Io.net.Stream = null,
 };
 
-/// Параллельно запускает два `pipeAll`: client.reader → upstream.writer и
-/// upstream.reader → client.writer. После завершения первого направления
-/// делает half-close на peer'е и дожидается второго, чтобы обычный FIN не
-/// превращался в зависший таск.
+/// Runs two `pipeAll`s in parallel: client.reader -> upstream.writer and
+/// upstream.reader -> client.writer. When the first direction finishes,
+/// half-closes the peer and waits for the second, so an ordinary FIN
+/// doesn't turn into a hung task.
 pub fn bidirectional(io: std.Io, client: Stream, upstream: Stream) !void {
     const Outcome = union(enum) {
         up: PipeError!usize,
