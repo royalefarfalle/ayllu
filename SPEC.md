@@ -1,18 +1,10 @@
 # ayllu — technical specification
 
-> *Ayllu* (Quechua) is an Andean community built on mutual support. This repo inherits the principle at the wire level: connectivity through cooperating nodes rather than centralized infrastructure.
+**SOCKS5 (RFC 1928) inside a pluggable outer wire, Zig 0.16 + `std.Io`.** Apps speak plain SOCKS5 to a local endpoint; the outer wire is what the DPI box sees, and it's swappable per deploy (HTTP-like today; REALITY TLS 1.3 + Shadowsocks-2022 in progress). Core is transport-agnostic — a `Transport` vtable over `Envelope` in [core/transport.zig](core/transport.zig) — with `InMemoryTransport` today and TCP / WebSocket / WireGuard / LoRa left for later phases.
 
-## What this is
+Out of scope: messenger, chat, HTML, web shell, VPN. Any user-facing surface is a separate repo. WireGuard-over-Ayllu is listed as future phase, not present scope. Resilience claims go in commits with KATs, not in this document.
 
-Ayllu is a **Zig 0.16 toolkit for SOCKS5 proxying with a pluggable outer transport.** The outer transport ("camouflage" in this codebase) is what the DPI box sees; the inner proxy is a plain SOCKS5 session that any app with a proxy setting (Telegram, curl, qBittorrent, WhatsApp) can speak.
-
-Core is transport-agnostic. Envelope delivery lives behind a `Transport` vtable in [core/transport.zig](core/transport.zig); the only shipping impl today is `InMemoryTransport` (for tests). TCP, WebSocket, WireGuard, and LoRa are left for later phases — the abstraction is already there.
-
-## What this is **not**
-
-- Not a messenger, not a chat UI. No HTML. No web shell. Any user-facing surface lives in a separate repo.
-- Not a claim that traffic survives modern DPI. Individual outer-transport impls (REALITY TLS 1.3, Shadowsocks-2022) land one checkpoint at a time with tests and KAT. Resilience is demonstrated in commits, not asserted in docs.
-- Not a VPN. Not yet, anyway — WireGuard-over-Ayllu is listed as future scope.
+Name: *ayllu* (Quechua) — an Andean community organized around mutual aid.
 
 ## Use cases (current and planned)
 

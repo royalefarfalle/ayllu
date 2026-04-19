@@ -1,14 +1,12 @@
 # ayllu
 
-*Ayllu* (Quechua) is an Andean community organized around mutual aid. The same idea applies to the network: connectivity through cooperating nodes rather than one central box.
+**SOCKS5 (RFC 1928) inside a pluggable outer wire, Zig 0.16 + `std.Io`.** Apps point at an ordinary SOCKS5 endpoint; the outer wire is what the DPI box sees, and it's swappable per deploy. In flight: REALITY TLS 1.3 (Xray v25.x) and Shadowsocks-2022.
 
-**What this repo is.** Zig 0.16 toolkit for SOCKS5 proxying with a pluggable outer transport (the "camouflage" layer). Built on `std.Io` for async + cancellation. The envelope layer in `core/` is transport-agnostic — a `Transport` vtable over `Envelope`, with `InMemoryTransport` today and WebSocket / WireGuard / LoRa left for later phases — so the same core can eventually ride whatever the wire turns out to be.
+- Core (`core/`) is transport-agnostic — `Transport` vtable over `Envelope`, with `InMemoryTransport` today. TCP, WebSocket, WireGuard, LoRa are later impls, not assumptions.
+- No chat, no UI, no HTML. Any user-facing surface is a separate repo.
+- Target: DPI that fingerprints TLS shape, actively probes, enumerates short ids. Resilience is demonstrated in commits, not claimed in the README.
 
-**What this repo is not.** Not a messenger, not a chat UI, no HTML. This is the transport and proxy infrastructure. Any user-facing surface lives in a separate repo.
-
-**Target adversary.** TLS-fingerprinting, active-probing, short-id-enumerating middleboxes (DPI circa 2026). We don't claim resilience ahead of the work landing; incident reports go in commit messages, not the README.
-
-Full specification: [SPEC.md](SPEC.md).
+Full spec: [SPEC.md](SPEC.md). Name: *ayllu* (Quechua) — an Andean community organized around mutual aid.
 
 ## Build
 
