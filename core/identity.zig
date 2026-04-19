@@ -56,6 +56,12 @@ pub const Identity = struct {
     }
 };
 
+fn hex32(comptime s: *const [64]u8) [32]u8 {
+    var out: [32]u8 = undefined;
+    _ = std.fmt.hexToBytes(&out, s) catch unreachable;
+    return out;
+}
+
 test "fromSeed is deterministic" {
     const seed: [32]u8 = @splat(0x42);
     const a = try Identity.fromSeed(seed);
@@ -67,6 +73,37 @@ test "fromSeed is deterministic" {
         &b.ed25519.public_key.toBytes(),
     );
     try std.testing.expectEqualSlices(u8, &a.x25519.public_key, &b.x25519.public_key);
+}
+
+test "fromSeed(0x42) golden vectors — wire-format anchor" {
+    const id = try Identity.fromSeed(@splat(0x42));
+    try std.testing.expectEqualSlices(
+        u8,
+        &hex32("2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12"),
+        &id.ed25519.public_key.toBytes(),
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &hex32("cc4f2cdb695dd766f34118eb67b98652fed1d8bc49c330b119bbfa8a64989378"),
+        &id.x25519.public_key,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &hex32("c3f8511d4d5006ea17bcd8890515b9f4bc965f1386def3bf1466b3be3bff5c8a"),
+        &id.fingerprint(),
+    );
+}
+
+test "x25519 is derived from ed25519 — single-secret-source invariant" {
+    const id = try Identity.fromSeed(@splat(0x33));
+    const expected_x = try crypto.X25519.KeyPair.fromEd25519(id.ed25519);
+    try std.testing.expectEqualSlices(u8, &expected_x.public_key, &id.x25519.public_key);
+    try std.testing.expectEqualSlices(u8, &expected_x.secret_key, &id.x25519.secret_key);
+}
+
+test "ed_public_key and x_public_key are distinct for same seed" {
+    const id = try Identity.fromSeed(@splat(0x42));
+    try std.testing.expect(!std.mem.eql(u8, &id.ed25519.public_key.toBytes(), &id.x25519.public_key));
 }
 
 test "generate produces distinct identities" {
@@ -84,6 +121,12 @@ test "sign and verify roundtrip" {
     try sig.verify(msg, id.ed25519.public_key);
 }
 
+test "sign verifies through publicView.ed_public_key too" {
+    const id = try Identity.fromSeed(@splat(0x55));
+    const sig = try id.sign("envelope-digest-placeholder");
+    try sig.verify("envelope-digest-placeholder", id.publicView().ed_public_key);
+}
+
 test "verify rejects tampered message" {
     const io = std.testing.io;
     const id = try Identity.generate(io);
@@ -94,6 +137,23 @@ test "verify rejects tampered message" {
     );
 }
 
+test "sign is deterministic (EdDSA, noise = null)" {
+    const id = try Identity.fromSeed(@splat(0x44));
+    const a = try id.sign("determinism");
+    const b = try id.sign("determinism");
+    try std.testing.expectEqualSlices(u8, &a.toBytes(), &b.toBytes());
+}
+
+test "sign empty message" {
+    const id = try Identity.fromSeed(@splat(0x66));
+    const sig = try id.sign("");
+    try sig.verify("", id.ed25519.public_key);
+    try std.testing.expectError(
+        error.SignatureVerificationFailed,
+        sig.verify("x", id.ed25519.public_key),
+    );
+}
+
 test "dh is symmetric" {
     const io = std.testing.io;
     const alice = try Identity.generate(io);
@@ -101,6 +161,22 @@ test "dh is symmetric" {
     const ss_a = try alice.dh(bob.x25519.public_key);
     const ss_b = try bob.dh(alice.x25519.public_key);
     try std.testing.expectEqualSlices(u8, &ss_a, &ss_b);
+}
+
+test "dh golden vector between seeds 0x0A and 0x0B" {
+    const alice = try Identity.fromSeed(@splat(0x0A));
+    const bob = try Identity.fromSeed(@splat(0x0B));
+    const ss = try alice.dh(bob.x25519.public_key);
+    try std.testing.expectEqualSlices(
+        u8,
+        &hex32("cefd70475e6e583341fc0fdaebed8bb6232cd3407f55c242fb794c7e508e5e59"),
+        &ss,
+    );
+}
+
+test "dh rejects all-zero peer key — fail-fast contract" {
+    const id = try Identity.fromSeed(@splat(0x77));
+    try std.testing.expectError(error.IdentityElement, id.dh(@splat(0)));
 }
 
 test "fingerprint derives from crypto.fingerprint(ed_pk, x_pk)" {
@@ -121,6 +197,17 @@ test "publicView carries the same public keys" {
     );
     try std.testing.expectEqualSlices(u8, &id.x25519.public_key, &pv.x_public_key);
     try std.testing.expectEqualSlices(u8, &id.fingerprint(), &pv.fingerprint());
+}
+
+test "publicView is a value copy, not aliased" {
+    const id = try Identity.fromSeed(@splat(0x22));
+    var pv = id.publicView();
+    pv.x_public_key[0] ^= 0xFF;
+    try std.testing.expect(pv.x_public_key[0] != id.x25519.public_key[0]);
+}
+
+test "Identity has only two fields — catches secret-leaking additions" {
+    try std.testing.expectEqual(@as(usize, 2), std.meta.fields(Identity).len);
 }
 
 test "distinct seeds produce distinct fingerprints" {

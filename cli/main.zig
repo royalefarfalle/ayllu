@@ -22,3 +22,8 @@ test "ayllu public surface exposes crypto.fingerprint" {
     const fp = ayllu.crypto.fingerprint(zero, zero);
     try std.testing.expectEqual(@as(usize, 32), fp.len);
 }
+
+test "ayllu public surface exposes identity.Identity" {
+    const id = try ayllu.identity.Identity.fromSeed(@splat(0));
+    _ = id.fingerprint();
+}
