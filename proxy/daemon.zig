@@ -7,9 +7,20 @@ const std = @import("std");
 const socks5 = @import("socks5.zig");
 const auth = @import("auth.zig");
 const relay = @import("relay.zig");
+const timeouts_mod = @import("timeouts.zig");
+
+pub const TimeoutConfig = struct {
+    handshake_ms: i64 = timeouts_mod.Defaults.handshake_ms,
+    upstream_connect_ms: i64 = timeouts_mod.Defaults.upstream_connect_ms,
+    /// Absolute cap on total session time (null = uncapped). Telegram
+    /// sessions can idle for hours, so leaving null is the safer default;
+    /// operators running many concurrent sessions may set a value.
+    max_session_ms: ?i64 = null,
+};
 
 pub const Config = struct {
     auth: auth.Config = .none,
+    timeouts: TimeoutConfig = .{},
 };
 
 pub const GreetingError = error{
@@ -142,11 +153,14 @@ pub fn sendReply(
     try client_w.flush();
 }
 
-/// Map a SOCKS5-decode error to the corresponding Reply code per RFC 1928 §6.
-pub fn errorToReply(err: RequestError) socks5.Reply {
+/// Map a decode-stage error to the corresponding Reply code per RFC 1928 §6.
+/// Accepts any error so the caller can funnel unexpected error types through
+/// .general_failure without first narrowing the set.
+pub fn errorToReply(err: anyerror) socks5.Reply {
     return switch (err) {
         error.BadCommand => .command_not_supported,
         error.BadAddressType => .address_type_not_supported,
+        error.Timeout => .ttl_expired,
         else => .general_failure,
     };
 }
@@ -181,21 +195,51 @@ fn acceptOneSessionWithConfig(io: std.Io, server: *std.Io.net.Server, config: Co
     try sessionWithConfig(io, accepted.socket, config);
 }
 
-fn connectUpstream(io: std.Io, address: socks5.Address, port: u16) !std.Io.net.Stream {
+fn connectUpstream(
+    io: std.Io,
+    address: socks5.Address,
+    port: u16,
+    deadline: std.Io.Clock.Timestamp,
+) !std.Io.net.Stream {
     switch (address) {
         .ipv4 => |bytes| {
             const addr: std.Io.net.IpAddress = .{ .ip4 = .{ .bytes = bytes, .port = port } };
-            return addr.connect(io, .{ .mode = .stream });
+            return timeouts_mod.connectDeadline(io, &addr, deadline);
         },
         .ipv6 => |bytes| {
             const addr: std.Io.net.IpAddress = .{ .ip6 = .{ .bytes = bytes, .port = port } };
-            return addr.connect(io, .{ .mode = .stream });
+            return timeouts_mod.connectDeadline(io, &addr, deadline);
         },
         .domain => |name| {
             const host = try std.Io.net.HostName.init(name);
-            return host.connect(io, port, .{ .mode = .stream });
+            return timeouts_mod.connectHostNameDeadline(io, host, port, deadline);
         },
     }
+}
+
+/// Wraps `handshakeWithConfig` with a single deadline that covers the entire
+/// greeting + method-nego + request-decode sequence. Returns error.Timeout
+/// if the client stalls at any point before CONNECT is parsed.
+fn handshakeWithDeadline(
+    io: std.Io,
+    client_r: *std.Io.Reader,
+    client_w: *std.Io.Writer,
+    config: Config,
+    deadline: std.Io.Clock.Timestamp,
+) (HandshakeError || error{Timeout} || std.Io.Cancelable)!socks5.Request {
+    const Outcome = union(enum) {
+        ok: HandshakeError!socks5.Request,
+        expire: std.Io.Cancelable!void,
+    };
+    var buf: [2]Outcome = undefined;
+    var select = std.Io.Select(Outcome).init(io, &buf);
+    defer select.cancelDiscard();
+    select.async(.ok, handshakeWithConfig, .{ client_r, client_w, config });
+    select.async(.expire, std.Io.Timeout.sleep, .{ .{ .deadline = deadline }, io });
+    return switch (try select.await()) {
+        .ok => |r| try r,
+        .expire => error.Timeout,
+    };
 }
 
 /// Full lifecycle of one client SOCKS5 connection: handshake ->
@@ -206,15 +250,28 @@ pub fn session(io: std.Io, client_socket: std.Io.net.Socket) !void {
 }
 
 pub fn sessionOnPreparedStream(io: std.Io, client: relay.Stream, config: Config) !void {
-    negotiateMethod(client.reader, client.writer, config) catch |err| switch (err) {
-        error.CredentialsRejected => return err,
-        error.NoAcceptableMethods => return err,
-        else => return err,
-    };
-
-    const req = readRequest(client.reader) catch |err| {
-        sendReply(client.writer, errorToReply(err), socks5.zero_ipv4, 0) catch {};
-        return err;
+    const hs_deadline = timeouts_mod.deadlineFromNowMs(io, config.timeouts.handshake_ms);
+    const req = handshakeWithDeadline(io, client.reader, client.writer, config, hs_deadline) catch |err| {
+        // Per RFC 1928 §6: non-greeting-level errors deserve a reply. Pre-
+        // greeting errors (BadVersion, NoMethods) came from non-SOCKS bytes;
+        // negotiateMethod already dropped silently. Request-stage errors
+        // after a successful method nego get a proper reply.
+        switch (err) {
+            error.Timeout,
+            error.BadVersion,
+            error.NoMethods,
+            error.CredentialsRejected,
+            error.NoAcceptableMethods,
+            error.ReadFailed,
+            error.EndOfStream,
+            error.WriteFailed,
+            error.Canceled,
+            => return err,
+            else => {
+                sendReply(client.writer, errorToReply(err), socks5.zero_ipv4, 0) catch {};
+                return err;
+            },
+        }
     };
 
     if (req.command != .connect) {
@@ -222,11 +279,14 @@ pub fn sessionOnPreparedStream(io: std.Io, client: relay.Stream, config: Config)
         return error.UnsupportedCommand;
     }
 
-    const upstream_stream = connectUpstream(io, req.address, req.port) catch |err| {
+    const upstream_deadline = timeouts_mod.deadlineFromNowMs(io, config.timeouts.upstream_connect_ms);
+    const upstream_stream = connectUpstream(io, req.address, req.port, upstream_deadline) catch |err| {
         const reply: socks5.Reply = if (err == error.ConnectionRefused)
             .connection_refused
         else if (err == error.NetworkUnreachable)
             .network_unreachable
+        else if (err == error.Timeout)
+            .ttl_expired
         else
             .host_unreachable;
         try sendReply(client.writer, reply, socks5.zero_ipv4, 0);
@@ -241,7 +301,12 @@ pub fn sessionOnPreparedStream(io: std.Io, client: relay.Stream, config: Config)
     var upstream_reader = std.Io.net.Stream.Reader.init(upstream_stream, io, &ur_buf);
     var upstream_writer = std.Io.net.Stream.Writer.init(upstream_stream, io, &uw_buf);
 
-    try relay.bidirectional(
+    const session_deadline: ?std.Io.Clock.Timestamp = if (config.timeouts.max_session_ms) |ms|
+        timeouts_mod.deadlineFromNowMs(io, ms)
+    else
+        null;
+
+    try relay.bidirectionalWithDeadline(
         io,
         client,
         .{
@@ -249,6 +314,7 @@ pub fn sessionOnPreparedStream(io: std.Io, client: relay.Stream, config: Config)
             .writer = &upstream_writer.interface,
             .net_stream = &upstream_stream,
         },
+        session_deadline,
     );
 }
 
@@ -458,6 +524,33 @@ test "session end-to-end proxies bytes to an upstream TCP server" {
     client_stream.close(io);
     try session_task.await(io);
     try upstream_task.await(io);
+}
+
+test "sessionWithConfig returns error.Timeout when client stalls during handshake" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var proxy = try (@as(std.Io.net.IpAddress, .{
+        .ip4 = std.Io.net.Ip4Address.loopback(0),
+    })).listen(io, .{ .reuse_address = true });
+    defer proxy.deinit(io);
+    const proxy_port = proxy.socket.address.getPort();
+
+    var session_task = io.async(acceptOneSessionWithConfig, .{
+        io,
+        &proxy,
+        Config{ .timeouts = .{ .handshake_ms = 200 } },
+    });
+    errdefer session_task.cancel(io) catch {};
+
+    const client_stream = try (@as(std.Io.net.IpAddress, .{
+        .ip4 = std.Io.net.Ip4Address.loopback(proxy_port),
+    })).connect(io, .{ .mode = .stream });
+    defer client_stream.close(io);
+
+    // Don't write anything. Daemon should hit the 200ms handshake deadline.
+    try std.testing.expectError(error.Timeout, session_task.await(io));
 }
 
 test "session end-to-end proxies bytes with RFC 1929 auth enabled" {

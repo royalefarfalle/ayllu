@@ -32,23 +32,41 @@ pub const Stream = struct {
 /// half-closes the peer and waits for the second, so an ordinary FIN
 /// doesn't turn into a hung task.
 pub fn bidirectional(io: std.Io, client: Stream, upstream: Stream) !void {
+    return bidirectionalWithDeadline(io, client, upstream, null);
+}
+
+/// Variant of `bidirectional` that also races against an optional absolute
+/// deadline. If the deadline fires before both directions reach EOF, returns
+/// `error.Timeout` and cancels the in-flight pipes. `null` disables the timer.
+pub fn bidirectionalWithDeadline(
+    io: std.Io,
+    client: Stream,
+    upstream: Stream,
+    deadline: ?std.Io.Clock.Timestamp,
+) (PipeError || error{Timeout} || std.Io.Cancelable)!void {
     const Outcome = union(enum) {
         up: PipeError!usize,
         down: PipeError!usize,
+        expire: std.Io.Cancelable!void,
     };
 
-    var select_buf: [2]Outcome = undefined;
+    var select_buf: [3]Outcome = undefined;
     var select = std.Io.Select(Outcome).init(io, &select_buf);
     defer select.cancelDiscard();
 
     select.async(.up, pipeAll, .{ client.reader, upstream.writer });
     select.async(.down, pipeAll, .{ upstream.reader, client.writer });
+    if (deadline) |d| {
+        select.async(.expire, std.Io.Timeout.sleep, .{ .{ .deadline = d }, io });
+    }
 
     switch (try select.await()) {
+        .expire => return error.Timeout,
         .up => |up_res| {
             _ = try up_res;
             halfCloseSend(upstream, io);
             switch (try select.await()) {
+                .expire => return error.Timeout,
                 .down => |down_res| _ = try down_res,
                 .up => unreachable,
             }
@@ -57,6 +75,7 @@ pub fn bidirectional(io: std.Io, client: Stream, upstream: Stream) !void {
             _ = try down_res;
             halfCloseSend(client, io);
             switch (try select.await()) {
+                .expire => return error.Timeout,
                 .up => |up_res| _ = try up_res,
                 .down => unreachable,
             }

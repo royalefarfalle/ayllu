@@ -41,8 +41,9 @@ pub fn sessionWithState(io: std.Io, client_socket: std.Io.net.Socket, state: *St
     var reader = std.Io.net.Stream.Reader.init(client_stream, io, &rbuf);
     var writer = std.Io.net.Stream.Writer.init(client_stream, io, &wbuf);
 
-    const head = takeRequestHead(&reader.interface, state.config.pivot.max_request_bytes) catch |err| switch (err) {
-        error.EndOfStream => return err,
+    const admission_deadline = proxy.timeouts.deadlineFromNowMs(io, proxy.timeouts.Defaults.handshake_ms);
+    const head = takeRequestHeadWithDeadline(io, &reader.interface, state.config.pivot.max_request_bytes, admission_deadline) catch |err| switch (err) {
+        error.EndOfStream, error.Timeout => return err,
         else => {
             writeFallbackResponse(&writer.interface, state.config.fallback) catch {};
             return err;
@@ -97,6 +98,30 @@ fn takeRequestHead(reader: *std.Io.Reader, max_request_bytes: usize) ![]const u8
         if (buffered.len >= max_request_bytes) return error.HeaderTooLarge;
         need = @min(max_request_bytes, buffered.len + 1);
     }
+}
+
+/// Wraps takeRequestHead in a deadline race so an idle client on the
+/// admission port doesn't pin a worker. Returns error.Timeout when the
+/// deadline fires before `\r\n\r\n` appears.
+fn takeRequestHeadWithDeadline(
+    io: std.Io,
+    reader: *std.Io.Reader,
+    max_request_bytes: usize,
+    deadline: std.Io.Clock.Timestamp,
+) ![]const u8 {
+    const Outcome = union(enum) {
+        ok: anyerror![]const u8,
+        expire: std.Io.Cancelable!void,
+    };
+    var buf: [2]Outcome = undefined;
+    var select = std.Io.Select(Outcome).init(io, &buf);
+    defer select.cancelDiscard();
+    select.async(.ok, takeRequestHead, .{ reader, max_request_bytes });
+    select.async(.expire, std.Io.Timeout.sleep, .{ .{ .deadline = deadline }, io });
+    return switch (try select.await()) {
+        .ok => |r| try r,
+        .expire => error.Timeout,
+    };
 }
 
 fn writeFallbackResponse(writer: *std.Io.Writer, fallback: FallbackResponse) !void {
