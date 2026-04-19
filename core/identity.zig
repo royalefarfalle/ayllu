@@ -18,41 +18,41 @@ pub const PublicIdentity = struct {
 };
 
 pub const Identity = struct {
-    ed: crypto.Ed25519.KeyPair,
-    x: crypto.X25519.KeyPair,
+    ed25519: crypto.Ed25519.KeyPair,
+    x25519: crypto.X25519.KeyPair,
 
     pub fn generate(io: std.Io) !Identity {
         const ed = crypto.Ed25519.KeyPair.generate(io);
         const x = try crypto.X25519.KeyPair.fromEd25519(ed);
-        return .{ .ed = ed, .x = x };
+        return .{ .ed25519 = ed, .x25519 = x };
     }
 
     pub fn fromSeed(seed: [crypto.Ed25519.KeyPair.seed_length]u8) !Identity {
         const ed = try crypto.Ed25519.KeyPair.generateDeterministic(seed);
         const x = try crypto.X25519.KeyPair.fromEd25519(ed);
-        return .{ .ed = ed, .x = x };
+        return .{ .ed25519 = ed, .x25519 = x };
     }
 
     pub fn publicView(self: Identity) PublicIdentity {
         return .{
-            .ed_public_key = self.ed.public_key,
-            .x_public_key = self.x.public_key,
+            .ed_public_key = self.ed25519.public_key,
+            .x_public_key = self.x25519.public_key,
         };
     }
 
     pub fn fingerprint(self: Identity) crypto.Fingerprint {
-        return self.publicView().fingerprint();
+        return crypto.fingerprint(self.ed25519.public_key.toBytes(), self.x25519.public_key);
     }
 
     pub fn sign(self: Identity, msg: []const u8) !crypto.Ed25519.Signature {
-        return self.ed.sign(msg, null);
+        return self.ed25519.sign(msg, null);
     }
 
     pub fn dh(
         self: Identity,
         peer_x_public_key: [crypto.X25519.public_length]u8,
     ) ![crypto.X25519.shared_length]u8 {
-        return crypto.X25519.scalarmult(self.x.secret_key, peer_x_public_key);
+        return crypto.X25519.scalarmult(self.x25519.secret_key, peer_x_public_key);
     }
 };
 
@@ -63,10 +63,10 @@ test "fromSeed is deterministic" {
     try std.testing.expectEqualSlices(u8, &a.fingerprint(), &b.fingerprint());
     try std.testing.expectEqualSlices(
         u8,
-        &a.ed.public_key.toBytes(),
-        &b.ed.public_key.toBytes(),
+        &a.ed25519.public_key.toBytes(),
+        &b.ed25519.public_key.toBytes(),
     );
-    try std.testing.expectEqualSlices(u8, &a.x.public_key, &b.x.public_key);
+    try std.testing.expectEqualSlices(u8, &a.x25519.public_key, &b.x25519.public_key);
 }
 
 test "generate produces distinct identities" {
@@ -81,7 +81,7 @@ test "sign and verify roundtrip" {
     const id = try Identity.generate(io);
     const msg = "привет, ayllu";
     const sig = try id.sign(msg);
-    try sig.verify(msg, id.ed.public_key);
+    try sig.verify(msg, id.ed25519.public_key);
 }
 
 test "verify rejects tampered message" {
@@ -90,7 +90,7 @@ test "verify rejects tampered message" {
     const sig = try id.sign("original");
     try std.testing.expectError(
         error.SignatureVerificationFailed,
-        sig.verify("tampered", id.ed.public_key),
+        sig.verify("tampered", id.ed25519.public_key),
     );
 }
 
@@ -98,22 +98,29 @@ test "dh is symmetric" {
     const io = std.testing.io;
     const alice = try Identity.generate(io);
     const bob = try Identity.generate(io);
-    const ss_a = try alice.dh(bob.x.public_key);
-    const ss_b = try bob.dh(alice.x.public_key);
+    const ss_a = try alice.dh(bob.x25519.public_key);
+    const ss_b = try bob.dh(alice.x25519.public_key);
     try std.testing.expectEqualSlices(u8, &ss_a, &ss_b);
-}
-
-test "publicView fingerprint matches identity fingerprint" {
-    const seed: [32]u8 = @splat(0x11);
-    const id = try Identity.fromSeed(seed);
-    try std.testing.expectEqualSlices(u8, &id.fingerprint(), &id.publicView().fingerprint());
 }
 
 test "fingerprint derives from crypto.fingerprint(ed_pk, x_pk)" {
     const seed: [32]u8 = @splat(0x77);
     const id = try Identity.fromSeed(seed);
-    const expected = crypto.fingerprint(id.ed.public_key.toBytes(), id.x.public_key);
+    const expected = crypto.fingerprint(id.ed25519.public_key.toBytes(), id.x25519.public_key);
     try std.testing.expectEqualSlices(u8, &expected, &id.fingerprint());
+}
+
+test "publicView carries the same public keys" {
+    const seed: [32]u8 = @splat(0x11);
+    const id = try Identity.fromSeed(seed);
+    const pv = id.publicView();
+    try std.testing.expectEqualSlices(
+        u8,
+        &id.ed25519.public_key.toBytes(),
+        &pv.ed_public_key.toBytes(),
+    );
+    try std.testing.expectEqualSlices(u8, &id.x25519.public_key, &pv.x_public_key);
+    try std.testing.expectEqualSlices(u8, &id.fingerprint(), &pv.fingerprint());
 }
 
 test "distinct seeds produce distinct fingerprints" {
