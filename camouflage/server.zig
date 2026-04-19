@@ -1,8 +1,18 @@
-//! Runtime bridge: HTTP-like camouflage head -> REALITY admission -> SOCKS.
+//! Camouflage session dispatcher. Accepts a client socket, runs a
+//! rate-limit pre-check, delegates to the configured OuterTransport
+//! for admission, and routes the outcome:
+//!   .pivoted  -> inner SOCKS5 (or direct-relay if the transport set
+//!                inner_target, as Shadowsocks will from C7 onward)
+//!   .fallback -> reverse-proxy the buffered preface to a cover host
+//!   .silent   -> close without writing
+//!
+//! `sessionWithState` keeps the pre-C3.5 API: it builds a
+//! LegacyHttpTransport from `state.config` and hands off to `dispatch`.
 
 const std = @import("std");
 const ayllu = @import("ayllu");
 const proxy = @import("ayllu-proxy");
+const transport_mod = @import("transport.zig");
 const pivot = @import("pivot.zig");
 const reality = @import("reality.zig");
 const tokens = @import("tokens.zig");
@@ -10,9 +20,10 @@ const reverse_proxy = @import("reverse_proxy.zig");
 const rate_limit = @import("rate_limit.zig");
 const cover_pool = @import("cover_pool.zig");
 const metrics_mod = @import("metrics.zig");
+const legacy_http_transport = @import("legacy_http_transport.zig");
 
-pub const replay_cache_entries = 4096;
-pub const max_request_head_bytes = 8192;
+pub const replay_cache_entries = legacy_http_transport.replay_cache_entries;
+pub const max_request_head_bytes = legacy_http_transport.max_request_head_bytes;
 
 const default_fallback_body =
     "<!doctype html><html><head><title>404 Not Found</title></head>" ++
@@ -28,17 +39,15 @@ pub const Config = struct {
     pivot: pivot.Config,
     proxy: proxy.daemon.Config = .{},
     fallback: FallbackResponse = .{},
-    /// Optional cover-site reverse proxy: when admission fails (probe,
-    /// non-SOCKS bytes, wrong token), we TCP-passthrough the session to
-    /// one of these hosts (weighted rotation per-session). Gives active
-    /// probes a byte-for-byte real response and burns fewer IPs.
+    /// Optional cover-site reverse proxy: when admission fails we
+    /// TCP-passthrough the buffered preface + rest of the stream to
+    /// one of these hosts. Gives active probes a byte-for-byte real
+    /// response and burns fewer IPs.
     cover_target: ?reverse_proxy.CoverTarget = null,
-    /// Optional weighted pool of cover hosts. When set, takes precedence
-    /// over `cover_target`. Entries are picked via std.Io.random per
-    /// session.
+    /// Weighted pool of cover hosts; takes precedence over
+    /// `cover_target` when non-empty.
     cover_pool: cover_pool.Pool = cover_pool.Pool.init(&.{}),
-    /// Per-source admission-failure rate limit. Enabled by default so a
-    /// single adversary can't enumerate the short_id space for free.
+    /// Per-source admission-failure rate limit. Enabled by default.
     rate_limit: rate_limit.Config = .{},
 };
 
@@ -59,14 +68,35 @@ pub const State = struct {
     }
 };
 
+/// Backward-compatible entry point: builds a default
+/// `LegacyHttpTransport` out of `state.config.pivot` and delegates to
+/// `dispatch`. Existing callers that only know about the HTTP-like
+/// admission don't need to change.
 pub fn sessionWithState(io: std.Io, client_socket: std.Io.net.Socket, state: *State) !void {
+    var legacy = legacy_http_transport.LegacyHttpTransport.init(.{
+        .pivot_config = state.config.pivot,
+        .replay_cache = &state.replay_cache,
+        .mutex = &state.mutex,
+    });
+    try dispatch(io, client_socket, state, legacy.outerTransport());
+}
+
+/// Transport-agnostic session driver. Owns the accept-side buffers,
+/// the rate-limit pre-check, the admission-outcome metrics, and the
+/// route from AdmitOutcome to the right downstream handler.
+pub fn dispatch(
+    io: std.Io,
+    client_socket: std.Io.net.Socket,
+    state: *State,
+    transport: transport_mod.OuterTransport,
+) !void {
     const client_stream: std.Io.net.Stream = .{ .socket = client_socket };
     defer client_stream.close(io);
 
     if (state.metrics) |m| m.sessions_total.inc();
 
-    // Rate-limit check BEFORE any crypto. Silent-drop indistinguishable
-    // from a random TCP stall from the client's point of view.
+    // Rate-limit check BEFORE any transport work. Silent-drop is
+    // indistinguishable from a random TCP stall from the client's POV.
     const peer_key = peerPrefixFromSocket(client_socket);
     if (state.limiter) |*l| {
         state.mutex.lockUncancelable(io);
@@ -83,95 +113,42 @@ pub fn sessionWithState(io: std.Io, client_socket: std.Io.net.Socket, state: *St
     var reader = std.Io.net.Stream.Reader.init(client_stream, io, &rbuf);
     var writer = std.Io.net.Stream.Writer.init(client_stream, io, &wbuf);
 
-    const admission_deadline = proxy.timeouts.deadlineFromNowMs(io, proxy.timeouts.Defaults.handshake_ms);
-    const head = takeRequestHeadWithDeadline(io, &reader.interface, state.config.pivot.max_request_bytes, admission_deadline) catch |err| switch (err) {
-        error.EndOfStream, error.Timeout => return err,
-        else => {
-            recordAdmissionFailure(state, peer_key, io);
-            if (state.metrics) |m| m.admission_fallback_total.inc();
-            const partial = reader.interface.buffered();
-            try serveFallback(io, state, partial, &reader.interface, &writer.interface, &client_stream);
-            return;
-        },
-    };
+    const outcome = transport.admit(.{
+        .io = io,
+        .reader = &reader.interface,
+        .writer = &writer.interface,
+        .net_stream = &client_stream,
+        .peer_key = peer_key,
+    }) catch |err| return err;
 
-    state.mutex.lockUncancelable(io);
-    const decision = pivot.classify(
-        replay_cache_entries,
-        head,
-        state.config.pivot,
-        nowUnixMs(io),
-        &state.replay_cache,
-    ) catch {
-        state.mutex.unlock(io);
-        recordAdmissionFailure(state, peer_key, io);
-        try serveFallback(io, state, head, &reader.interface, &writer.interface, &client_stream);
-        return;
-    };
-    state.mutex.unlock(io);
-
-    switch (decision) {
-        .fallback => {
-            recordAdmissionFailure(state, peer_key, io);
-            if (state.metrics) |m| m.admission_fallback_total.inc();
-            try serveFallback(io, state, head, &reader.interface, &writer.interface, &client_stream);
-        },
-        .pivot => {
+    switch (outcome) {
+        .pivoted => |p| {
             recordAdmissionSuccess(state, peer_key, io);
             if (state.metrics) |m| m.admission_success_total.inc();
-            try writer.interface.writeAll(
-                "HTTP/1.1 101 Switching Protocols\r\n" ++
-                    "Connection: Upgrade\r\n" ++
-                    "Upgrade: ayllu-socks\r\n\r\n",
-            );
-            try writer.interface.flush();
-            try proxy.daemon.sessionOnPreparedStream(io, .{
-                .reader = &reader.interface,
-                .writer = &writer.interface,
-                .net_stream = &client_stream,
-            }, state.config.proxy);
+            defer if (p.on_close) |f| f(p.ctx_for_close, io);
+            if (p.inner_target) |target| {
+                try proxy.daemon.sessionOnPreparedStreamDirect(
+                    io,
+                    p.stream,
+                    target.address,
+                    target.port,
+                    state.config.proxy,
+                );
+            } else {
+                try proxy.daemon.sessionOnPreparedStream(io, p.stream, state.config.proxy);
+            }
+        },
+        .fallback => |f| {
+            recordAdmissionFailure(state, peer_key, io);
+            if (state.metrics) |m| m.admission_fallback_total.inc();
+            try serveFallback(io, state, f.buffered_head, &reader.interface, &writer.interface, &client_stream);
+        },
+        .silent => {
+            recordAdmissionFailure(state, peer_key, io);
+            if (state.metrics) |m| m.admission_silent_drops_total.inc();
+            // Fall through to defer client_stream.close.
         },
     }
-}
-
-fn takeRequestHead(reader: *std.Io.Reader, max_request_bytes: usize) ![]const u8 {
-    if (max_request_bytes == 0 or max_request_bytes > max_request_head_bytes) {
-        return error.HeaderTooLarge;
-    }
-
-    var need: usize = 1;
-    while (true) {
-        const buffered = try reader.peekGreedy(need);
-        if (std.mem.indexOf(u8, buffered, "\r\n\r\n")) |header_end| {
-            return reader.take(header_end + 4);
-        }
-        if (buffered.len >= max_request_bytes) return error.HeaderTooLarge;
-        need = @min(max_request_bytes, buffered.len + 1);
-    }
-}
-
-/// Wraps takeRequestHead in a deadline race so an idle client on the
-/// admission port doesn't pin a worker. Returns error.Timeout when the
-/// deadline fires before `\r\n\r\n` appears.
-fn takeRequestHeadWithDeadline(
-    io: std.Io,
-    reader: *std.Io.Reader,
-    max_request_bytes: usize,
-    deadline: std.Io.Clock.Timestamp,
-) ![]const u8 {
-    const Outcome = union(enum) {
-        ok: anyerror![]const u8,
-        expire: std.Io.Cancelable!void,
-    };
-    var buf: [2]Outcome = undefined;
-    var select = std.Io.Select(Outcome).init(io, &buf);
-    defer select.cancelDiscard();
-    select.async(.ok, takeRequestHead, .{ reader, max_request_bytes });
-    select.async(.expire, std.Io.Timeout.sleep, .{ .{ .deadline = deadline }, io });
-    return switch (try select.await()) {
-        .ok => |r| try r,
-        .expire => error.Timeout,
-    };
 }
 
 fn writeFallbackResponse(writer: *std.Io.Writer, fallback: FallbackResponse) !void {
@@ -186,10 +163,10 @@ fn writeFallbackResponse(writer: *std.Io.Writer, fallback: FallbackResponse) !vo
     try writer.flush();
 }
 
-/// Decides between reverse-proxy to cover (if configured) and the static
-/// 404. The reverse-proxy path is the preferred one for any deploy that
-/// expects active probes; the static path is kept for tests and for
-/// operators who can't reach a cover host from the VPS.
+/// Decides between reverse-proxy to cover (if configured) and the
+/// static 404. The reverse-proxy path is preferred for any deploy
+/// that expects active probes; the static path is kept for tests and
+/// for operators who can't reach a cover host from the VPS.
 fn serveFallback(
     io: std.Io,
     state: *State,
@@ -198,8 +175,6 @@ fn serveFallback(
     writer_iface: *std.Io.Writer,
     client_stream: *const std.Io.net.Stream,
 ) !void {
-    // Prefer the weighted pool; fall back to the single cover_target; then
-    // to the static 404.
     const chosen: ?reverse_proxy.CoverTarget = blk: {
         if (state.config.cover_pool.pickRandom(io)) |t| break :blk t;
         break :blk state.config.cover_target;
@@ -215,8 +190,6 @@ fn serveFallback(
             client_stream,
             cover_deadline,
         ) catch {
-            // Cover unreachable / pipe failed. Fall back to static so the
-            // client still gets a closed socket cleanly instead of a hang.
             writeFallbackResponse(writer_iface, state.config.fallback) catch {};
         };
     } else {
@@ -244,10 +217,11 @@ fn recordAdmissionSuccess(state: *State, key: rate_limit.PrefixKey, io: std.Io) 
     }
 }
 
-/// Extract a /24 or /64 prefix for the peer from a connected socket handle.
-/// On failure (unsupported address family, syscall error) returns the zero
-/// prefix — all anonymous peers then share one bucket, which is still
-/// enough to rate-limit an adversary probing without a stable source IP.
+/// Extract a /24 or /64 prefix for the peer from a connected socket
+/// handle. On failure (unsupported family, syscall error) returns the
+/// zero prefix — all anonymous peers then share one bucket, which is
+/// still enough to rate-limit an adversary probing without a stable
+/// source IP.
 fn peerPrefixFromSocket(socket: std.Io.net.Socket) rate_limit.PrefixKey {
     var addr: std.posix.sockaddr.storage = undefined;
     var addrlen: std.posix.socklen_t = @sizeOf(std.posix.sockaddr.storage);
@@ -285,11 +259,102 @@ fn acceptOneSession(io: std.Io, server: *std.Io.net.Server, state: *State) anyer
     try sessionWithState(io, accepted.socket, state);
 }
 
+fn acceptOneDispatch(
+    io: std.Io,
+    server: *std.Io.net.Server,
+    state: *State,
+    transport: transport_mod.OuterTransport,
+) anyerror!void {
+    const accepted = try server.accept(io);
+    try dispatch(io, accepted.socket, state, transport);
+}
+
 fn hex32(comptime s: *const [64]u8) [32]u8 {
     var out: [32]u8 = undefined;
     _ = std.fmt.hexToBytes(&out, s) catch unreachable;
     return out;
 }
+
+// -------------------- MockTransport (test helper) --------------------
+// Used by the C3.5 dispatcher tests to force each AdmitOutcome variant
+// without running the real HTTP admission parser.
+
+const MockTransportMode = union(enum) {
+    silent: void,
+    fallback: void,
+    pivot_socks5: void,
+    pivot_direct: struct { target_port: u16 },
+    propagate_error: anyerror,
+};
+
+const MockTransport = struct {
+    mode: MockTransportMode,
+    admit_calls: u32 = 0,
+
+    fn nameFn(_: *anyopaque) []const u8 {
+        return "mock";
+    }
+
+    fn admitFn(
+        ctx: *anyopaque,
+        admission: transport_mod.AdmissionContext,
+    ) anyerror!transport_mod.AdmitOutcome {
+        const self: *MockTransport = @ptrCast(@alignCast(ctx));
+        self.admit_calls += 1;
+        // Drain whatever the client prewrote so the reader's buffer
+        // has a deterministic state for fallback tests.
+        const drained = admission.reader.buffered();
+        return switch (self.mode) {
+            .silent => .silent,
+            .fallback => transport_mod.AdmitOutcome{ .fallback = .{ .buffered_head = drained } },
+            .pivot_socks5 => transport_mod.AdmitOutcome{ .pivoted = .{
+                .stream = .{
+                    .reader = admission.reader,
+                    .writer = admission.writer,
+                    .net_stream = admission.net_stream,
+                },
+            } },
+            .pivot_direct => |p| transport_mod.AdmitOutcome{ .pivoted = .{
+                .stream = .{
+                    .reader = admission.reader,
+                    .writer = admission.writer,
+                    .net_stream = admission.net_stream,
+                },
+                .inner_target = .{
+                    .address = .{ .ipv4 = .{ 127, 0, 0, 1 } },
+                    .port = p.target_port,
+                },
+            } },
+            .propagate_error => |err| err,
+        };
+    }
+
+    const vtable: transport_mod.OuterTransport.VTable = .{
+        .admit = admitFn,
+        .name = nameFn,
+    };
+
+    fn outerTransport(self: *MockTransport) transport_mod.OuterTransport {
+        return .{ .ctx = @ptrCast(self), .vtable = &vtable };
+    }
+};
+
+fn zeroState() State {
+    return .{
+        .config = .{
+            .pivot = .{
+                .reality = .{
+                    .target = .{ .host = "example.com", .port = 443 },
+                    .server_names = &.{"example.com"},
+                    .private_key = [_]u8{0} ** 32,
+                    .short_ids = &.{},
+                },
+            },
+        },
+    };
+}
+
+// -------------------- Tests --------------------
 
 test "sessionWithState falls back with honest HTTP response when token is absent" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
@@ -345,7 +410,6 @@ test "sessionWithState reverse-proxies to cover host on admission fallback" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    // Fake cover server: reads some bytes and echoes them back.
     var cover = try (@as(std.Io.net.IpAddress, .{
         .ip4 = std.Io.net.Ip4Address.loopback(0),
     })).listen(io, .{ .reuse_address = true });
@@ -355,7 +419,6 @@ test "sessionWithState reverse-proxies to cover host on admission fallback" {
     var cover_task = io.async(echoOnce, .{ io, &cover, probe.len });
     errdefer cover_task.cancel(io) catch {};
 
-    // Camouflage server configured to reverse-proxy fallbacks to the fake.
     var camo = try (@as(std.Io.net.IpAddress, .{
         .ip4 = std.Io.net.Ip4Address.loopback(0),
     })).listen(io, .{ .reuse_address = true });
@@ -390,8 +453,6 @@ test "sessionWithState reverse-proxies to cover host on admission fallback" {
     var reader = std.Io.net.Stream.Reader.init(client, io, &cr_buf);
     var writer = std.Io.net.Stream.Writer.init(client, io, &cw_buf);
 
-    // Probe: a plain HTTP request without REALITY admission headers —
-    // classify -> .fallback -> reverse-proxy -> cover echoes bytes back.
     try writer.interface.writeAll(probe);
     try writer.interface.flush();
 
@@ -436,8 +497,6 @@ test "rate limiter silences the source after repeated admission failures" {
 
     const camo_port = camo.socket.address.getPort();
 
-    // Fire enough failed admissions to trip the limiter: 2 failures (under
-    // failures_per_window=2) flips the /24 into silent-drop for 60s.
     var i: usize = 0;
     while (i < 3) : (i += 1) {
         var session_task = io.async(acceptOneSession, .{ io, &camo, &state });
@@ -454,11 +513,9 @@ test "rate limiter silences the source after repeated admission failures" {
         var reader = std.Io.net.Stream.Reader.init(client, io, &cr_buf);
         var writer = std.Io.net.Stream.Writer.init(client, io, &cw_buf);
 
-        // Probe with no admission token => classify .fallback => records failure.
         writer.interface.writeAll("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n") catch {};
         writer.interface.flush() catch {};
 
-        // Read whatever the server gives us (fallback body or silent EOF).
         var scratch: [64]u8 = undefined;
         const n = reader.interface.readVec(@constCast(&[_][]u8{&scratch})) catch 0;
         _ = n;
@@ -467,9 +524,6 @@ test "rate limiter silences the source after repeated admission failures" {
         session_task.await(io) catch {};
     }
 
-    // Next connection should be silent-dropped: limiter consult returns
-    // .drop_silently before any reads; server closes the socket with no
-    // response.
     var final_task = io.async(acceptOneSession, .{ io, &camo, &state });
     errdefer final_task.cancel(io) catch {};
     const final_client = try (@as(std.Io.net.IpAddress, .{
@@ -480,7 +534,6 @@ test "rate limiter silences the source after repeated admission failures" {
     var cr_buf: [64]u8 = undefined;
     var reader = std.Io.net.Stream.Reader.init(final_client, io, &cr_buf);
 
-    // Silent drop manifests as an immediate EOF from the server side.
     const peek_result = reader.interface.peek(1);
     try std.testing.expectError(error.EndOfStream, peek_result);
     try final_task.await(io);
@@ -591,4 +644,317 @@ test "sessionWithState pivots then serves inner SOCKS over the same socket" {
     client_open = false;
     try session_task.await(io);
     try upstream_task.await(io);
+}
+
+// -------------------- C3.5 new tests --------------------
+
+test "dispatch: mock .silent closes socket with no response" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var camo = try (@as(std.Io.net.IpAddress, .{
+        .ip4 = std.Io.net.Ip4Address.loopback(0),
+    })).listen(io, .{ .reuse_address = true });
+    defer camo.deinit(io);
+    const camo_port = camo.socket.address.getPort();
+
+    var state = zeroState();
+    var mock: MockTransport = .{ .mode = .silent };
+
+    var session_task = io.async(acceptOneDispatch, .{ io, &camo, &state, mock.outerTransport() });
+    errdefer session_task.cancel(io) catch {};
+
+    const client = try (@as(std.Io.net.IpAddress, .{
+        .ip4 = std.Io.net.Ip4Address.loopback(camo_port),
+    })).connect(io, .{ .mode = .stream });
+    defer client.close(io);
+
+    var rbuf: [64]u8 = undefined;
+    var reader = std.Io.net.Stream.Reader.init(client, io, &rbuf);
+    // Silent drop = immediate EOF on the read side.
+    try std.testing.expectError(error.EndOfStream, reader.interface.peek(1));
+    try session_task.await(io);
+    try std.testing.expectEqual(@as(u32, 1), mock.admit_calls);
+}
+
+test "dispatch: mock .fallback forwards buffered preface to cover host" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var cover = try (@as(std.Io.net.IpAddress, .{
+        .ip4 = std.Io.net.Ip4Address.loopback(0),
+    })).listen(io, .{ .reuse_address = true });
+    defer cover.deinit(io);
+    const cover_port = cover.socket.address.getPort();
+    const probe = "PROBE\r\n\r\n";
+    var cover_task = io.async(echoOnce, .{ io, &cover, probe.len });
+    errdefer cover_task.cancel(io) catch {};
+
+    var camo = try (@as(std.Io.net.IpAddress, .{
+        .ip4 = std.Io.net.Ip4Address.loopback(0),
+    })).listen(io, .{ .reuse_address = true });
+    defer camo.deinit(io);
+    const camo_port = camo.socket.address.getPort();
+
+    var state = zeroState();
+    state.config.cover_target = .{ .host = "127.0.0.1", .port = cover_port };
+    var mock: MockTransport = .{ .mode = .fallback };
+
+    var session_task = io.async(acceptOneDispatch, .{ io, &camo, &state, mock.outerTransport() });
+    errdefer session_task.cancel(io) catch {};
+
+    const client = try (@as(std.Io.net.IpAddress, .{
+        .ip4 = std.Io.net.Ip4Address.loopback(camo_port),
+    })).connect(io, .{ .mode = .stream });
+    var client_open = true;
+    defer if (client_open) client.close(io);
+
+    var cr_buf: [128]u8 = undefined;
+    var cw_buf: [128]u8 = undefined;
+    var reader = std.Io.net.Stream.Reader.init(client, io, &cr_buf);
+    var writer = std.Io.net.Stream.Writer.init(client, io, &cw_buf);
+
+    try writer.interface.writeAll(probe);
+    try writer.interface.flush();
+
+    // Mock drained the preface into reader.buffered() and returned it as
+    // the fallback buffered_head; reverse-proxy replays to cover which echoes.
+    const echoed = try reader.interface.take(probe.len);
+    try std.testing.expectEqualStrings(probe, echoed);
+
+    client.close(io);
+    client_open = false;
+    try cover_task.await(io);
+    try session_task.await(io);
+}
+
+test "dispatch: mock .fallback without cover writes static 404" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var camo = try (@as(std.Io.net.IpAddress, .{
+        .ip4 = std.Io.net.Ip4Address.loopback(0),
+    })).listen(io, .{ .reuse_address = true });
+    defer camo.deinit(io);
+    const camo_port = camo.socket.address.getPort();
+
+    var state = zeroState();
+    var mock: MockTransport = .{ .mode = .fallback };
+
+    var session_task = io.async(acceptOneDispatch, .{ io, &camo, &state, mock.outerTransport() });
+    errdefer session_task.cancel(io) catch {};
+
+    const client = try (@as(std.Io.net.IpAddress, .{
+        .ip4 = std.Io.net.Ip4Address.loopback(camo_port),
+    })).connect(io, .{ .mode = .stream });
+    var client_open = true;
+    defer if (client_open) client.close(io);
+
+    var cr_buf: [512]u8 = undefined;
+    var cw_buf: [128]u8 = undefined;
+    var reader = std.Io.net.Stream.Reader.init(client, io, &cr_buf);
+    var writer = std.Io.net.Stream.Writer.init(client, io, &cw_buf);
+
+    try writer.interface.writeAll("anything\r\n\r\n");
+    try writer.interface.flush();
+
+    const response = try reader.interface.peekGreedy(1);
+    try std.testing.expect(std.mem.startsWith(u8, response, "HTTP/1.1 404 Not Found"));
+
+    client.close(io);
+    client_open = false;
+    try session_task.await(io);
+}
+
+test "dispatch: mock .pivoted without inner_target runs SOCKS5 inside the stream" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var upstream = try (@as(std.Io.net.IpAddress, .{
+        .ip4 = std.Io.net.Ip4Address.loopback(0),
+    })).listen(io, .{ .reuse_address = true });
+    defer upstream.deinit(io);
+    const upstream_port = upstream.socket.address.getPort();
+    var upstream_task = io.async(echoOnce, .{ io, &upstream, 4 });
+    errdefer upstream_task.cancel(io) catch {};
+
+    var camo = try (@as(std.Io.net.IpAddress, .{
+        .ip4 = std.Io.net.Ip4Address.loopback(0),
+    })).listen(io, .{ .reuse_address = true });
+    defer camo.deinit(io);
+    const camo_port = camo.socket.address.getPort();
+
+    var state = zeroState();
+    var mock: MockTransport = .{ .mode = .pivot_socks5 };
+
+    var session_task = io.async(acceptOneDispatch, .{ io, &camo, &state, mock.outerTransport() });
+    errdefer session_task.cancel(io) catch {};
+
+    const client = try (@as(std.Io.net.IpAddress, .{
+        .ip4 = std.Io.net.Ip4Address.loopback(camo_port),
+    })).connect(io, .{ .mode = .stream });
+    var client_open = true;
+    defer if (client_open) client.close(io);
+
+    var cr_buf: [256]u8 = undefined;
+    var cw_buf: [256]u8 = undefined;
+    var reader = std.Io.net.Stream.Reader.init(client, io, &cr_buf);
+    var writer = std.Io.net.Stream.Writer.init(client, io, &cw_buf);
+
+    const greeting = [_]u8{ 0x05, 0x01, 0x00 };
+    var socks_request = [_]u8{ 0x05, 0x01, 0x00, 0x01, 127, 0, 0, 1, 0, 0 };
+    std.mem.writeInt(u16, socks_request[8..10], upstream_port, .big);
+    try writer.interface.writeAll(&greeting);
+    try writer.interface.writeAll(&socks_request);
+    try writer.interface.flush();
+
+    const method_reply = try reader.interface.take(2);
+    try std.testing.expectEqualSlices(u8, &.{ 0x05, 0x00 }, method_reply);
+    const connect_reply = try reader.interface.take(10);
+    try std.testing.expectEqualSlices(u8, &.{ 0x05, 0x00, 0x00, 0x01 }, connect_reply[0..4]);
+
+    try writer.interface.writeAll("ping");
+    try writer.interface.flush();
+    const echoed = try reader.interface.take(4);
+    try std.testing.expectEqualStrings("ping", echoed);
+
+    client.close(io);
+    client_open = false;
+    try session_task.await(io);
+    try upstream_task.await(io);
+}
+
+test "dispatch: mock .pivoted with inner_target relays directly to target (no SOCKS5)" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var upstream = try (@as(std.Io.net.IpAddress, .{
+        .ip4 = std.Io.net.Ip4Address.loopback(0),
+    })).listen(io, .{ .reuse_address = true });
+    defer upstream.deinit(io);
+    const upstream_port = upstream.socket.address.getPort();
+    var upstream_task = io.async(echoOnce, .{ io, &upstream, 4 });
+    errdefer upstream_task.cancel(io) catch {};
+
+    var camo = try (@as(std.Io.net.IpAddress, .{
+        .ip4 = std.Io.net.Ip4Address.loopback(0),
+    })).listen(io, .{ .reuse_address = true });
+    defer camo.deinit(io);
+    const camo_port = camo.socket.address.getPort();
+
+    var state = zeroState();
+    var mock: MockTransport = .{ .mode = .{ .pivot_direct = .{ .target_port = upstream_port } } };
+
+    var session_task = io.async(acceptOneDispatch, .{ io, &camo, &state, mock.outerTransport() });
+    errdefer session_task.cancel(io) catch {};
+
+    const client = try (@as(std.Io.net.IpAddress, .{
+        .ip4 = std.Io.net.Ip4Address.loopback(camo_port),
+    })).connect(io, .{ .mode = .stream });
+    var client_open = true;
+    defer if (client_open) client.close(io);
+
+    var cr_buf: [128]u8 = undefined;
+    var cw_buf: [128]u8 = undefined;
+    var reader = std.Io.net.Stream.Reader.init(client, io, &cr_buf);
+    var writer = std.Io.net.Stream.Writer.init(client, io, &cw_buf);
+
+    // No SOCKS5 handshake — bytes flow straight through to 127.0.0.1:upstream_port.
+    try writer.interface.writeAll("ping");
+    try writer.interface.flush();
+    const echoed = try reader.interface.take(4);
+    try std.testing.expectEqualStrings("ping", echoed);
+
+    client.close(io);
+    client_open = false;
+    try session_task.await(io);
+    try upstream_task.await(io);
+}
+
+test "dispatch: rate-limit pre-check preempts transport.admit" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var camo = try (@as(std.Io.net.IpAddress, .{
+        .ip4 = std.Io.net.Ip4Address.loopback(0),
+    })).listen(io, .{ .reuse_address = true });
+    defer camo.deinit(io);
+    const camo_port = camo.socket.address.getPort();
+
+    var state = zeroState();
+    state.config.rate_limit = .{
+        .failures_per_window = 2,
+        .window_ms = 60_000,
+        .silent_duration_ms = 60_000,
+    };
+    state.initLimiter(std.testing.allocator);
+    defer state.deinitLimiter();
+
+    var mock: MockTransport = .{ .mode = .fallback };
+
+    // Fire 3 admissions — each returns .fallback (records a failure).
+    // After 2 failures the /24 trips into silent-drop; the 3rd never
+    // reaches the mock's admit.
+    var i: usize = 0;
+    while (i < 3) : (i += 1) {
+        var session_task = io.async(acceptOneDispatch, .{ io, &camo, &state, mock.outerTransport() });
+        errdefer session_task.cancel(io) catch {};
+
+        const client = try (@as(std.Io.net.IpAddress, .{
+            .ip4 = std.Io.net.Ip4Address.loopback(camo_port),
+        })).connect(io, .{ .mode = .stream });
+        var client_open = true;
+        defer if (client_open) client.close(io);
+
+        var cr_buf: [128]u8 = undefined;
+        var cw_buf: [128]u8 = undefined;
+        var reader = std.Io.net.Stream.Reader.init(client, io, &cr_buf);
+        var writer = std.Io.net.Stream.Writer.init(client, io, &cw_buf);
+
+        writer.interface.writeAll("anything\r\n\r\n") catch {};
+        writer.interface.flush() catch {};
+        var scratch: [64]u8 = undefined;
+        _ = reader.interface.readVec(@constCast(&[_][]u8{&scratch})) catch 0;
+        client.close(io);
+        client_open = false;
+        session_task.await(io) catch {};
+    }
+
+    // Two admissions hit the mock before the limiter tripped. The third
+    // was silenced by the rate-limit pre-check and never called admit.
+    try std.testing.expectEqual(@as(u32, 2), mock.admit_calls);
+}
+
+test "dispatch: transport.admit error propagates and closes socket cleanly" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var camo = try (@as(std.Io.net.IpAddress, .{
+        .ip4 = std.Io.net.Ip4Address.loopback(0),
+    })).listen(io, .{ .reuse_address = true });
+    defer camo.deinit(io);
+    const camo_port = camo.socket.address.getPort();
+
+    var state = zeroState();
+    var mock: MockTransport = .{ .mode = .{ .propagate_error = error.TestInjected } };
+
+    var session_task = io.async(acceptOneDispatch, .{ io, &camo, &state, mock.outerTransport() });
+    errdefer session_task.cancel(io) catch {};
+
+    const client = try (@as(std.Io.net.IpAddress, .{
+        .ip4 = std.Io.net.Ip4Address.loopback(camo_port),
+    })).connect(io, .{ .mode = .stream });
+    defer client.close(io);
+
+    // Dispatcher surfaces the error to the caller (acceptOneDispatch ->
+    // session_task.await). The socket is closed by the dispatcher's
+    // defer; the client sees an immediate EOF.
+    try std.testing.expectError(error.TestInjected, session_task.await(io));
 }

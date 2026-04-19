@@ -333,6 +333,44 @@ pub fn sessionWithConfig(io: std.Io, client_socket: std.Io.net.Socket, config: C
     }, config);
 }
 
+/// Variant of `sessionOnPreparedStream` where the destination is
+/// already known (e.g. Shadowsocks-2022 carries the target inside its
+/// first encrypted frame, so there's no SOCKS5 handshake to run).
+/// Connects to `(address, port)` with the upstream-connect deadline,
+/// then relays bidirectionally.
+pub fn sessionOnPreparedStreamDirect(
+    io: std.Io,
+    client: relay.Stream,
+    address: socks5.Address,
+    port: u16,
+    config: Config,
+) !void {
+    const upstream_deadline = timeouts_mod.deadlineFromNowMs(io, config.timeouts.upstream_connect_ms);
+    const upstream_stream = try connectUpstream(io, address, port, upstream_deadline);
+    defer upstream_stream.close(io);
+
+    var ur_buf: [4096]u8 = undefined;
+    var uw_buf: [4096]u8 = undefined;
+    var upstream_reader = std.Io.net.Stream.Reader.init(upstream_stream, io, &ur_buf);
+    var upstream_writer = std.Io.net.Stream.Writer.init(upstream_stream, io, &uw_buf);
+
+    const session_deadline: ?std.Io.Clock.Timestamp = if (config.timeouts.max_session_ms) |ms|
+        timeouts_mod.deadlineFromNowMs(io, ms)
+    else
+        null;
+
+    try relay.bidirectionalWithDeadline(
+        io,
+        client,
+        .{
+            .reader = &upstream_reader.interface,
+            .writer = &upstream_writer.interface,
+            .net_stream = &upstream_stream,
+        },
+        session_deadline,
+    );
+}
+
 test "handshake happy path: no-auth greeting + CONNECT IPv4" {
     var backing: [512]u8 = undefined;
     const greeting = &[_]u8{ 0x05, 0x01, 0x00 };
