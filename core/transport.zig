@@ -5,7 +5,9 @@
 //! для тестов других модулей core/ (registry, chat).
 
 const std = @import("std");
-const Envelope = @import("envelope.zig").Envelope;
+const envelope_mod = @import("envelope.zig");
+const Envelope = envelope_mod.Envelope;
+const Identity = @import("identity.zig").Identity;
 
 pub const Transport = struct {
     ptr: *anyopaque,
@@ -30,12 +32,19 @@ pub const Transport = struct {
     }
 };
 
+/// In-memory FIFO loopback. Copies payload bytes on send and retains every
+/// buffer (both in-queue and already-recv'd) until `deinit`, so callers never
+/// have to track lifetimes.
 pub const InMemoryTransport = struct {
     allocator: std.mem.Allocator,
-    inbox: std.ArrayList(Envelope) = .empty,
+    inbox: std.Deque(Envelope) = .empty,
+    consumed_payloads: std.ArrayList([]u8) = .empty,
 
     pub fn deinit(self: *InMemoryTransport) void {
+        while (self.inbox.popFront()) |env| self.allocator.free(@constCast(env.payload));
         self.inbox.deinit(self.allocator);
+        for (self.consumed_payloads.items) |p| self.allocator.free(p);
+        self.consumed_payloads.deinit(self.allocator);
     }
 
     pub fn transport(self: *InMemoryTransport) Transport {
@@ -50,22 +59,24 @@ pub const InMemoryTransport = struct {
 
     fn sendImpl(ctx: *anyopaque, envelope: *const Envelope) anyerror!void {
         const self: *InMemoryTransport = @ptrCast(@alignCast(ctx));
-        try self.inbox.append(self.allocator, envelope.*);
+        const owned_payload = try self.allocator.dupe(u8, envelope.payload);
+        errdefer self.allocator.free(owned_payload);
+        var copy = envelope.*;
+        copy.payload = owned_payload;
+        try self.inbox.pushBack(self.allocator, copy);
     }
 
     fn recvImpl(ctx: *anyopaque) anyerror!?Envelope {
         const self: *InMemoryTransport = @ptrCast(@alignCast(ctx));
-        if (self.inbox.items.len == 0) return null;
-        return self.inbox.orderedRemove(0);
+        const env = self.inbox.popFront() orelse return null;
+        try self.consumed_payloads.append(self.allocator, @constCast(env.payload));
+        return env;
     }
 
     fn nameImpl(_: *anyopaque) []const u8 {
         return "in-memory";
     }
 };
-
-const envelope_mod = @import("envelope.zig");
-const Identity = @import("identity.zig").Identity;
 
 test "InMemoryTransport: recv returns null on empty" {
     var t: InMemoryTransport = .{ .allocator = std.testing.allocator };
@@ -105,25 +116,22 @@ test "InMemoryTransport: FIFO order preserved" {
     try std.testing.expectEqual(@as(?Envelope, null), try tr.recv());
 }
 
-test "InMemoryTransport: name() returns identifier" {
+test "InMemoryTransport: name returns identifier" {
     var t: InMemoryTransport = .{ .allocator = std.testing.allocator };
     defer t.deinit();
     try std.testing.expectEqualStrings("in-memory", t.transport().name());
 }
 
-test "Transport vtable dispatch: calls reach the concrete impl" {
+test "Transport: vtable dispatch reaches concrete impl" {
     var t: InMemoryTransport = .{ .allocator = std.testing.allocator };
     defer t.deinit();
     const alice = try Identity.fromSeed(@splat(0x43));
     const env = try envelope_mod.buildAndSign(std.testing.io, alice, .broadcast, 0, 1, "p");
     try t.transport().send(&env);
-    try std.testing.expectEqual(@as(usize, 1), t.inbox.items.len);
+    try std.testing.expectEqual(@as(usize, 1), t.inbox.len);
 }
 
-test "Transport: send-recv with tampered envelope still carries same bytes" {
-    // Transport is unaware of envelope semantics — it moves bytes. A tampered
-    // envelope must traverse the transport unchanged; verify's job is to
-    // reject it at the receiver.
+test "Transport: tampered envelope traverses unchanged, verify rejects at receiver" {
     var t: InMemoryTransport = .{ .allocator = std.testing.allocator };
     defer t.deinit();
     const alice = try Identity.fromSeed(@splat(0x44));
@@ -136,4 +144,16 @@ test "Transport: send-recv with tampered envelope still carries same bytes" {
         error.SignatureVerificationFailed,
         got.verify(alice.publicView()),
     );
+}
+
+test "InMemoryTransport: send copies payload — overwriting source after send is safe" {
+    var t: InMemoryTransport = .{ .allocator = std.testing.allocator };
+    defer t.deinit();
+    const alice = try Identity.fromSeed(@splat(0x45));
+    var payload_buf: [8]u8 = "original".*;
+    var env = try envelope_mod.buildAndSign(std.testing.io, alice, .broadcast, 0, 1, &payload_buf);
+    try t.transport().send(&env);
+    @memset(&payload_buf, 'X');
+    const got = (try t.transport().recv()).?;
+    try std.testing.expectEqualStrings("original", got.payload);
 }
