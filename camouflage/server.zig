@@ -6,6 +6,7 @@ const proxy = @import("ayllu-proxy");
 const pivot = @import("pivot.zig");
 const reality = @import("reality.zig");
 const tokens = @import("tokens.zig");
+const reverse_proxy = @import("reverse_proxy.zig");
 
 pub const replay_cache_entries = 4096;
 pub const max_request_head_bytes = 8192;
@@ -24,6 +25,11 @@ pub const Config = struct {
     pivot: pivot.Config,
     proxy: proxy.daemon.Config = .{},
     fallback: FallbackResponse = .{},
+    /// Optional cover-site reverse proxy: when admission fails (probe,
+    /// non-SOCKS bytes, wrong token), we TCP-passthrough the session to
+    /// this host instead of sending a static 404. Gives active probes a
+    /// byte-for-byte real response and burns fewer IPs.
+    cover_target: ?reverse_proxy.CoverTarget = null,
 };
 
 pub const State = struct {
@@ -45,8 +51,9 @@ pub fn sessionWithState(io: std.Io, client_socket: std.Io.net.Socket, state: *St
     const head = takeRequestHeadWithDeadline(io, &reader.interface, state.config.pivot.max_request_bytes, admission_deadline) catch |err| switch (err) {
         error.EndOfStream, error.Timeout => return err,
         else => {
-            writeFallbackResponse(&writer.interface, state.config.fallback) catch {};
-            return err;
+            const partial = reader.interface.buffered();
+            try serveFallback(io, state, partial, &reader.interface, &writer.interface, &client_stream);
+            return;
         },
     };
 
@@ -57,16 +64,16 @@ pub fn sessionWithState(io: std.Io, client_socket: std.Io.net.Socket, state: *St
         state.config.pivot,
         nowUnixMs(io),
         &state.replay_cache,
-    ) catch |err| {
+    ) catch {
         state.mutex.unlock(io);
-        writeFallbackResponse(&writer.interface, state.config.fallback) catch {};
-        return err;
+        try serveFallback(io, state, head, &reader.interface, &writer.interface, &client_stream);
+        return;
     };
     state.mutex.unlock(io);
 
     switch (decision) {
         .fallback => {
-            try writeFallbackResponse(&writer.interface, state.config.fallback);
+            try serveFallback(io, state, head, &reader.interface, &writer.interface, &client_stream);
         },
         .pivot => {
             try writer.interface.writeAll(
@@ -134,6 +141,38 @@ fn writeFallbackResponse(writer: *std.Io.Writer, fallback: FallbackResponse) !vo
     try writer.writeAll(head);
     try writer.writeAll(fallback.body);
     try writer.flush();
+}
+
+/// Decides between reverse-proxy to cover (if configured) and the static
+/// 404. The reverse-proxy path is the preferred one for any deploy that
+/// expects active probes; the static path is kept for tests and for
+/// operators who can't reach a cover host from the VPS.
+fn serveFallback(
+    io: std.Io,
+    state: *State,
+    buffered_head: []const u8,
+    reader_iface: *std.Io.Reader,
+    writer_iface: *std.Io.Writer,
+    client_stream: *const std.Io.net.Stream,
+) !void {
+    if (state.config.cover_target) |cover| {
+        const cover_deadline = proxy.timeouts.deadlineFromNowMs(io, proxy.timeouts.Defaults.upstream_connect_ms);
+        reverse_proxy.forwardBuffered(
+            io,
+            cover,
+            buffered_head,
+            reader_iface,
+            writer_iface,
+            client_stream,
+            cover_deadline,
+        ) catch {
+            // Cover unreachable / pipe failed. Fall back to static so the
+            // client still gets a closed socket cleanly instead of a hang.
+            writeFallbackResponse(writer_iface, state.config.fallback) catch {};
+        };
+    } else {
+        try writeFallbackResponse(writer_iface, state.config.fallback);
+    }
 }
 
 fn nowUnixMs(io: std.Io) i64 {
@@ -212,6 +251,70 @@ test "sessionWithState falls back with honest HTTP response when token is absent
     client.close(io);
     client_open = false;
     try session_task.await(io);
+}
+
+test "sessionWithState reverse-proxies to cover host on admission fallback" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // Fake cover server: reads some bytes and echoes them back.
+    var cover = try (@as(std.Io.net.IpAddress, .{
+        .ip4 = std.Io.net.Ip4Address.loopback(0),
+    })).listen(io, .{ .reuse_address = true });
+    defer cover.deinit(io);
+    const cover_port = cover.socket.address.getPort();
+    const probe = "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
+    var cover_task = io.async(echoOnce, .{ io, &cover, probe.len });
+    errdefer cover_task.cancel(io) catch {};
+
+    // Camouflage server configured to reverse-proxy fallbacks to the fake.
+    var camo = try (@as(std.Io.net.IpAddress, .{
+        .ip4 = std.Io.net.Ip4Address.loopback(0),
+    })).listen(io, .{ .reuse_address = true });
+    defer camo.deinit(io);
+
+    var state: State = .{
+        .config = .{
+            .pivot = .{
+                .reality = .{
+                    .target = .{ .host = "example.com", .port = 443 },
+                    .server_names = &.{"example.com"},
+                    .private_key = hex32("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+                    .short_ids = &[_]reality.ShortId{try reality.parseShortId("aabb")},
+                },
+            },
+            .cover_target = .{ .host = "127.0.0.1", .port = cover_port },
+        },
+    };
+
+    var camo_task = io.async(acceptOneSession, .{ io, &camo, &state });
+    errdefer camo_task.cancel(io) catch {};
+
+    const camo_port = camo.socket.address.getPort();
+    const client = try (@as(std.Io.net.IpAddress, .{
+        .ip4 = std.Io.net.Ip4Address.loopback(camo_port),
+    })).connect(io, .{ .mode = .stream });
+    var client_open = true;
+    defer if (client_open) client.close(io);
+
+    var cr_buf: [512]u8 = undefined;
+    var cw_buf: [512]u8 = undefined;
+    var reader = std.Io.net.Stream.Reader.init(client, io, &cr_buf);
+    var writer = std.Io.net.Stream.Writer.init(client, io, &cw_buf);
+
+    // Probe: a plain HTTP request without REALITY admission headers —
+    // classify -> .fallback -> reverse-proxy -> cover echoes bytes back.
+    try writer.interface.writeAll(probe);
+    try writer.interface.flush();
+
+    const echoed = try reader.interface.take(probe.len);
+    try std.testing.expectEqualStrings(probe, echoed);
+
+    client.close(io);
+    client_open = false;
+    try cover_task.await(io);
+    try camo_task.await(io);
 }
 
 test "sessionWithState pivots then serves inner SOCKS over the same socket" {
