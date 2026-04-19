@@ -17,6 +17,14 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    const camouflage_mod = b.addModule("ayllu-camouflage", .{
+        .root_source_file = b.path("camouflage/root.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "ayllu", .module = ayllu_mod },
+        },
+    });
+
     const exe = b.addExecutable(.{
         .name = "ayllu",
         .root_module = b.createModule(.{
@@ -64,11 +72,15 @@ pub fn build(b: *std.Build) void {
     const proxy_tests = b.addTest(.{ .root_module = proxy_mod });
     const run_proxy_tests = b.addRunArtifact(proxy_tests);
 
+    const camouflage_tests = b.addTest(.{ .root_module = camouflage_mod });
+    const run_camouflage_tests = b.addRunArtifact(camouflage_tests);
+
     const exe_tests = b.addTest(.{ .root_module = exe.root_module });
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_proxy_tests.step);
+    test_step.dependOn(&run_camouflage_tests.step);
     test_step.dependOn(&run_exe_tests.step);
 }
