@@ -6,9 +6,11 @@
 //! DPI-маскировку поверх любого из них.
 
 pub const socks5 = @import("socks5.zig");
+pub const relay = @import("relay.zig");
 
 test {
     _ = socks5;
+    _ = relay;
 }
 
 test "proxy public surface exposes socks5.decodeGreeting + decodeRequest" {
