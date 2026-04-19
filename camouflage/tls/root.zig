@@ -6,8 +6,10 @@
 
 pub const record = @import("record.zig");
 pub const keys = @import("keys.zig");
+pub const client_hello = @import("client_hello.zig");
 
 test {
     _ = record;
     _ = keys;
+    _ = client_hello;
 }
