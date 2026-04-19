@@ -43,3 +43,10 @@ test "ayllu public surface: end-to-end send + recv + verify via transport" {
     const got = (try t.transport().recv()).?;
     try got.verify(id.publicView());
 }
+
+test "ayllu public surface exposes registry.Group" {
+    var g: ayllu.registry.Group = .{ .allocator = std.testing.allocator, .id = @splat(0) };
+    defer g.deinit();
+    try g.apply(.{ .add = .{ .member = @splat(0xAA), .event_id = @splat(0x01) } });
+    try std.testing.expectEqual(@as(usize, 1), g.memberCount());
+}
