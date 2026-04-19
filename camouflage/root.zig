@@ -9,6 +9,7 @@ pub const cover_pool = @import("cover_pool.zig");
 pub const metrics = @import("metrics.zig");
 pub const transport = @import("transport.zig");
 pub const legacy_http_transport = @import("legacy_http_transport.zig");
+pub const tls = @import("tls/root.zig");
 pub const server = @import("server.zig");
 pub const client = @import("client.zig");
 
@@ -22,6 +23,7 @@ test {
     _ = metrics;
     _ = transport;
     _ = legacy_http_transport;
+    _ = tls;
     _ = server;
     _ = client;
 }
