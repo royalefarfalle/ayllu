@@ -9,6 +9,7 @@ const tokens = @import("tokens.zig");
 const reverse_proxy = @import("reverse_proxy.zig");
 const rate_limit = @import("rate_limit.zig");
 const cover_pool = @import("cover_pool.zig");
+const metrics_mod = @import("metrics.zig");
 
 pub const replay_cache_entries = 4096;
 pub const max_request_head_bytes = 8192;
@@ -46,6 +47,7 @@ pub const State = struct {
     mutex: std.Io.Mutex = .init,
     replay_cache: tokens.ReplayCache(replay_cache_entries) = .{},
     limiter: ?rate_limit.RateLimiter = null,
+    metrics: ?*metrics_mod.Registry = null,
 
     pub fn initLimiter(self: *State, allocator: std.mem.Allocator) void {
         self.limiter = rate_limit.RateLimiter.init(allocator, self.config.rate_limit);
@@ -61,6 +63,8 @@ pub fn sessionWithState(io: std.Io, client_socket: std.Io.net.Socket, state: *St
     const client_stream: std.Io.net.Stream = .{ .socket = client_socket };
     defer client_stream.close(io);
 
+    if (state.metrics) |m| m.sessions_total.inc();
+
     // Rate-limit check BEFORE any crypto. Silent-drop indistinguishable
     // from a random TCP stall from the client's point of view.
     const peer_key = peerPrefixFromSocket(client_socket);
@@ -68,7 +72,10 @@ pub fn sessionWithState(io: std.Io, client_socket: std.Io.net.Socket, state: *St
         state.mutex.lockUncancelable(io);
         const verdict = l.consult(peer_key, nowUnixMs(io));
         state.mutex.unlock(io);
-        if (verdict == .drop_silently) return;
+        if (verdict == .drop_silently) {
+            if (state.metrics) |m| m.admission_silent_drops_total.inc();
+            return;
+        }
     }
 
     var rbuf: [max_request_head_bytes]u8 = undefined;
@@ -81,6 +88,7 @@ pub fn sessionWithState(io: std.Io, client_socket: std.Io.net.Socket, state: *St
         error.EndOfStream, error.Timeout => return err,
         else => {
             recordAdmissionFailure(state, peer_key, io);
+            if (state.metrics) |m| m.admission_fallback_total.inc();
             const partial = reader.interface.buffered();
             try serveFallback(io, state, partial, &reader.interface, &writer.interface, &client_stream);
             return;
@@ -105,10 +113,12 @@ pub fn sessionWithState(io: std.Io, client_socket: std.Io.net.Socket, state: *St
     switch (decision) {
         .fallback => {
             recordAdmissionFailure(state, peer_key, io);
+            if (state.metrics) |m| m.admission_fallback_total.inc();
             try serveFallback(io, state, head, &reader.interface, &writer.interface, &client_stream);
         },
         .pivot => {
             recordAdmissionSuccess(state, peer_key, io);
+            if (state.metrics) |m| m.admission_success_total.inc();
             try writer.interface.writeAll(
                 "HTTP/1.1 101 Switching Protocols\r\n" ++
                     "Connection: Upgrade\r\n" ++

@@ -1,0 +1,59 @@
+[Unit]
+Description=Ayllu camouflage + SOCKS5 proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ayllu
+Group=ayllu
+
+# --- Runtime configuration ------------------------------------------------
+#
+# Edit /etc/ayllu/camouflage.env to set the REALITY key material, cover
+# pool, and auth file. Or replace the environment lookups below with
+# literal values. At minimum the daemon needs --target, --server-name,
+# --private-key, --short-id, and either --auth-file or --cover-site.
+#
+EnvironmentFile=/etc/ayllu/camouflage.env
+
+ExecStart=/usr/local/bin/ayllu-camouflage-proxy \
+  --listen ${AYLLU_LISTEN} \
+  --target ${AYLLU_TARGET} \
+  --server-name ${AYLLU_SERVER_NAME} \
+  --private-key ${AYLLU_PRIVATE_KEY} \
+  --short-id ${AYLLU_SHORT_ID} \
+  --auth-file /etc/ayllu/credentials \
+  --cover-site archive.ubuntu.com:443:3 \
+  --cover-site www.debian.org:443:2 \
+  --cover-site www.microsoft.com:443:1 \
+  --admission-fail-threshold 20 \
+  --admission-window-ms 60000 \
+  --admission-silent-ms 300000
+
+Restart=on-failure
+RestartSec=3
+
+# --- Sandbox --------------------------------------------------------------
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+
+# Credentials file is mode 0600 root:ayllu; daemon only needs read.
+ReadOnlyPaths=/etc/ayllu
+
+[Install]
+WantedBy=multi-user.target

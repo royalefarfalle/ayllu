@@ -25,6 +25,7 @@ pub fn main(init: std.process.Init) !void {
     var cover_target: ?ayllu_camouflage.reverse_proxy.CoverTarget = null;
     var pool_entries = std.ArrayList(ayllu_camouflage.cover_pool.WeightedCover).empty;
     var rate_limit_cfg: ayllu_camouflage.rate_limit.Config = .{};
+    var metrics_listen: ?std.Io.net.IpAddress = null;
 
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
@@ -99,6 +100,10 @@ pub fn main(init: std.process.Init) !void {
             i += 1;
             if (i >= args.len) return error.MissingAdmissionSilentValue;
             rate_limit_cfg.silent_duration_ms = std.fmt.parseInt(i64, args[i], 10) catch return error.BadAdmissionSilentValue;
+        } else if (std.mem.eql(u8, args[i], "--metrics-listen")) {
+            i += 1;
+            if (i >= args.len) return error.MissingMetricsListenValue;
+            _, _, metrics_listen = try parseListenSpec(args[i]);
         } else if (std.mem.eql(u8, args[i], "--help") or std.mem.eql(u8, args[i], "-h")) {
             try printUsage(io);
             return;
@@ -119,6 +124,7 @@ pub fn main(init: std.process.Init) !void {
     };
     try reality_config.validate();
 
+    var registry: ayllu_camouflage.metrics.Registry = .{};
     var state: ayllu_camouflage.server.State = .{
         .config = .{
             .pivot = .{
@@ -130,9 +136,18 @@ pub fn main(init: std.process.Init) !void {
             .cover_pool = ayllu_camouflage.cover_pool.Pool.init(pool_entries.items),
             .rate_limit = rate_limit_cfg,
         },
+        .metrics = &registry,
     };
     state.initLimiter(gpa);
     defer state.deinitLimiter();
+
+    // Optional Prometheus-style metrics endpoint on a separate listener.
+    var metrics_server_storage: ?std.Io.net.Server = null;
+    if (metrics_listen) |m_addr| {
+        metrics_server_storage = try m_addr.listen(io, .{ .reuse_address = true });
+        _ = io.async(ayllu_camouflage.metrics.serve, .{ io, &metrics_server_storage.?, @as(*const ayllu_camouflage.metrics.Registry, &registry) });
+    }
+    defer if (metrics_server_storage) |*s| s.deinit(io);
 
     const addr = listen_addr orelse try std.Io.net.IpAddress.parse(listen_host, listen_port);
     var server = try addr.listen(io, .{ .reuse_address = true });
@@ -196,6 +211,9 @@ fn printUsage(io: std.Io) !void {
         \\                             (default 60000)
         \\  --admission-silent-ms N    how long to drop silently after trip
         \\                             (default 300000)
+        \\  --metrics-listen HOST:PORT serve Prometheus /metrics on a separate
+        \\                             port; counters for sessions, fallbacks,
+        \\                             silent drops, and upstream errors
         \\  --help                     show this help
         \\
     );
