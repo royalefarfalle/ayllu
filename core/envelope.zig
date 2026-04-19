@@ -336,13 +336,11 @@ test "verify rejects envelope with mutant PublicIdentity (Alice ed + Bob x)" {
     try std.testing.expectError(error.FingerprintMismatch, env.verify(mutant));
 }
 
-test "verify rejects tampered signature bytes" {
+test "verify rejects signature that isn't over this envelope's digest" {
     const io = std.testing.io;
     const alice = try Identity.fromSeed(@splat(0x30));
     var env = try buildAndSign(io, alice, .broadcast, 0, 1, "p");
-    var sig_bytes = env.signature.toBytes();
-    sig_bytes[0] ^= 0x01;
-    env.signature = crypto.Ed25519.Signature.fromBytes(sig_bytes);
+    env.signature = try alice.sign("not this envelope's digest");
     try std.testing.expectError(
         error.SignatureVerificationFailed,
         env.verify(alice.publicView()),
