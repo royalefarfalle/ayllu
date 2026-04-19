@@ -101,6 +101,25 @@ fn makeHandshakeBytes(buf: []u8, greeting: []const u8, request: []const u8) []co
     return buf[0 .. greeting.len + request.len];
 }
 
+fn echoOnce(io: std.Io, server: *std.Io.net.Server, expected_len: usize) anyerror!void {
+    const stream = try server.accept(io);
+    defer stream.close(io);
+
+    var rbuf: [256]u8 = undefined;
+    var wbuf: [256]u8 = undefined;
+    var reader = std.Io.net.Stream.Reader.init(stream, io, &rbuf);
+    var writer = std.Io.net.Stream.Writer.init(stream, io, &wbuf);
+
+    const payload = try reader.interface.take(expected_len);
+    try writer.interface.writeAll(payload);
+    try writer.interface.flush();
+}
+
+fn acceptOneSession(io: std.Io, server: *std.Io.net.Server) anyerror!void {
+    const accepted = try server.accept(io);
+    try session(io, accepted.socket);
+}
+
 fn connectUpstream(io: std.Io, address: socks5.Address, port: u16) !std.Io.net.Stream {
     switch (address) {
         .ipv4 => |bytes| {
@@ -278,4 +297,60 @@ test "errorToReply maps request-stage errors to RFC 1928 reply codes" {
     try std.testing.expectEqual(socks5.Reply.address_type_not_supported, errorToReply(error.BadAddressType));
     try std.testing.expectEqual(socks5.Reply.general_failure, errorToReply(error.BadVersion));
     try std.testing.expectEqual(socks5.Reply.general_failure, errorToReply(error.EmptyDomain));
+}
+
+test "session end-to-end proxies bytes to an upstream TCP server" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var upstream = try (@as(std.Io.net.IpAddress, .{
+        .ip4 = std.Io.net.Ip4Address.loopback(0),
+    })).listen(io, .{ .reuse_address = true });
+    defer upstream.deinit(io);
+
+    const upstream_port = upstream.socket.address.getPort();
+    var upstream_task = io.async(echoOnce, .{ io, &upstream, 4 });
+    errdefer upstream_task.cancel(io) catch {};
+
+    var proxy = try (@as(std.Io.net.IpAddress, .{
+        .ip4 = std.Io.net.Ip4Address.loopback(0),
+    })).listen(io, .{ .reuse_address = true });
+    defer proxy.deinit(io);
+    const proxy_port = proxy.socket.address.getPort();
+    var session_task = io.async(acceptOneSession, .{ io, &proxy });
+    errdefer session_task.cancel(io) catch {};
+
+    const client_stream = try (@as(std.Io.net.IpAddress, .{
+        .ip4 = std.Io.net.Ip4Address.loopback(proxy_port),
+    })).connect(io, .{ .mode = .stream });
+    errdefer client_stream.close(io);
+
+    var cr_buf: [256]u8 = undefined;
+    var cw_buf: [256]u8 = undefined;
+    var client_reader = std.Io.net.Stream.Reader.init(client_stream, io, &cr_buf);
+    var client_writer = std.Io.net.Stream.Writer.init(client_stream, io, &cw_buf);
+
+    const greeting = [_]u8{ 0x05, 0x01, 0x00 };
+    var request = [_]u8{ 0x05, 0x01, 0x00, 0x01, 127, 0, 0, 1, 0, 0 };
+    std.mem.writeInt(u16, request[8..10], upstream_port, .big);
+
+    try client_writer.interface.writeAll(&greeting);
+    try client_writer.interface.writeAll(&request);
+    try client_writer.interface.flush();
+
+    const method_reply = try client_reader.interface.take(2);
+    try std.testing.expectEqualSlices(u8, &.{ 0x05, 0x00 }, method_reply);
+
+    const connect_reply = try client_reader.interface.take(10);
+    try std.testing.expectEqualSlices(u8, &.{ 0x05, 0x00, 0x00, 0x01 }, connect_reply[0..4]);
+
+    try client_writer.interface.writeAll("ping");
+    try client_writer.interface.flush();
+    const echoed = try client_reader.interface.take(4);
+    try std.testing.expectEqualStrings("ping", echoed);
+
+    client_stream.close(io);
+    try session_task.await(io);
+    try upstream_task.await(io);
 }

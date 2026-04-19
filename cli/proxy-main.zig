@@ -12,6 +12,7 @@ pub fn main(init: std.process.Init) !void {
 
     var listen_host: []const u8 = default_listen_host;
     var listen_port: u16 = default_listen_port;
+    var listen_addr: ?std.Io.net.IpAddress = null;
 
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
@@ -19,9 +20,10 @@ pub fn main(init: std.process.Init) !void {
             i += 1;
             if (i >= args.len) return error.MissingListenValue;
             const spec = args[i];
-            const colon = std.mem.lastIndexOfScalar(u8, spec, ':') orelse return error.BadListenSpec;
-            listen_host = spec[0..colon];
-            listen_port = try std.fmt.parseInt(u16, spec[colon + 1 ..], 10);
+            const parsed_host, const parsed_port, const parsed_addr = try parseListenSpec(spec);
+            listen_host = parsed_host;
+            listen_port = parsed_port;
+            listen_addr = parsed_addr;
         } else if (std.mem.eql(u8, args[i], "--help") or std.mem.eql(u8, args[i], "-h")) {
             try printUsage(io);
             return;
@@ -31,7 +33,7 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    const addr: std.Io.net.IpAddress = try std.Io.net.IpAddress.parse(listen_host, listen_port);
+    const addr = listen_addr orelse try std.Io.net.IpAddress.parse(listen_host, listen_port);
     var server = try addr.listen(io, .{ .reuse_address = true });
     defer server.deinit(io);
 
@@ -73,4 +75,43 @@ fn printUsage(io: std.Io) !void {
         \\
     );
     try w.interface.flush();
+}
+
+fn parseListenSpec(spec: []const u8) !struct { []const u8, u16, std.Io.net.IpAddress } {
+    if (spec.len == 0) return error.BadListenSpec;
+
+    if (spec[0] == '[') {
+        const end = std.mem.indexOfScalar(u8, spec, ']') orelse return error.BadListenSpec;
+        if (end + 1 >= spec.len or spec[end + 1] != ':') return error.BadListenSpec;
+        const host = spec[1..end];
+        const port = std.fmt.parseInt(u16, spec[end + 2 ..], 10) catch return error.BadListenSpec;
+        return .{ host, port, try std.Io.net.IpAddress.parse(host, port) };
+    }
+
+    const colon = std.mem.lastIndexOfScalar(u8, spec, ':') orelse return error.BadListenSpec;
+    if (std.mem.indexOfScalar(u8, spec[0..colon], ':') != null) {
+        return error.BadListenSpec;
+    }
+    const host = spec[0..colon];
+    const port = std.fmt.parseInt(u16, spec[colon + 1 ..], 10) catch return error.BadListenSpec;
+    return .{ host, port, try std.Io.net.IpAddress.parse(host, port) };
+}
+
+test "parseListenSpec parses IPv4 listen spec" {
+    const host, const port, const addr = try parseListenSpec("127.0.0.1:1080");
+    try std.testing.expectEqualStrings("127.0.0.1", host);
+    try std.testing.expect(addr == .ip4);
+    try std.testing.expectEqual(@as(u16, 1080), port);
+    try std.testing.expectEqualSlices(u8, &.{ 127, 0, 0, 1 }, &addr.ip4.bytes);
+}
+
+test "parseListenSpec parses bracketed IPv6 listen spec" {
+    const host, const port, const addr = try parseListenSpec("[::1]:1080");
+    try std.testing.expectEqualStrings("::1", host);
+    try std.testing.expect(addr == .ip6);
+    try std.testing.expectEqual(@as(u16, 1080), port);
+}
+
+test "parseListenSpec rejects bare IPv6 form" {
+    try std.testing.expectError(error.BadListenSpec, parseListenSpec("::1:1080"));
 }
