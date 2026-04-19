@@ -13,6 +13,7 @@ pub fn main(init: std.process.Init) !void {
     var listen_host: []const u8 = default_listen_host;
     var listen_port: u16 = default_listen_port;
     var listen_addr: ?std.Io.net.IpAddress = null;
+    var config: ayllu_proxy.daemon.Config = .{};
 
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
@@ -24,6 +25,10 @@ pub fn main(init: std.process.Init) !void {
             listen_host = parsed_host;
             listen_port = parsed_port;
             listen_addr = parsed_addr;
+        } else if (std.mem.eql(u8, args[i], "--auth-file")) {
+            i += 1;
+            if (i >= args.len) return error.MissingAuthFileValue;
+            config.auth = try ayllu_proxy.auth.loadFromFile(io, gpa, args[i]);
         } else if (std.mem.eql(u8, args[i], "--help") or std.mem.eql(u8, args[i], "-h")) {
             try printUsage(io);
             return;
@@ -50,12 +55,12 @@ pub fn main(init: std.process.Init) !void {
             std.log.warn("accept failed: {t}", .{err});
             continue;
         };
-        _ = io.async(sessionWrapper, .{ io, client_stream.socket });
+        _ = io.async(sessionWrapper, .{ io, client_stream.socket, config });
     }
 }
 
-fn sessionWrapper(io: std.Io, socket: std.Io.net.Socket) void {
-    ayllu_proxy.daemon.session(io, socket) catch |err| switch (err) {
+fn sessionWrapper(io: std.Io, socket: std.Io.net.Socket, config: ayllu_proxy.daemon.Config) void {
+    ayllu_proxy.daemon.sessionWithConfig(io, socket, config) catch |err| switch (err) {
         error.EndOfStream, error.Canceled => {},
         else => std.log.warn("session ended: {t}", .{err}),
     };
@@ -67,11 +72,12 @@ fn printUsage(io: std.Io) !void {
     try w.interface.writeAll(
         \\ayllu-proxy — SOCKS5 (RFC 1928) proxy daemon
         \\
-        \\Usage: ayllu-proxy [--listen HOST:PORT]
+        \\Usage: ayllu-proxy [--listen HOST:PORT] [--auth-file PATH]
         \\
         \\Options:
-        \\  --listen  Interface to bind (default 0.0.0.0:1080)
-        \\  --help    Show this help
+        \\  --listen     Interface to bind (default 0.0.0.0:1080)
+        \\  --auth-file  File with `username:password` for RFC 1929 auth
+        \\  --help       Show this help
         \\
     );
     try w.interface.flush();

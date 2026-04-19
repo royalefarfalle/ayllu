@@ -7,11 +7,13 @@
 
 pub const socks5 = @import("socks5.zig");
 pub const relay = @import("relay.zig");
+pub const auth = @import("auth.zig");
 pub const daemon = @import("daemon.zig");
 
 test {
     _ = socks5;
     _ = relay;
+    _ = auth;
     _ = daemon;
 }
 

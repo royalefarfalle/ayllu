@@ -3,6 +3,7 @@
 const std = @import("std");
 
 pub const version: u8 = 5;
+pub const username_password_auth_version: u8 = 1;
 
 pub const Method = enum(u8) {
     no_auth = 0x00,
@@ -49,11 +50,14 @@ pub const Reply = enum(u8) {
 pub const DecodeError = error{
     ShortBuffer,
     BadVersion,
+    BadAuthVersion,
     NoMethods,
     BadCommand,
     BadAddressType,
     BadReserved,
     EmptyDomain,
+    EmptyUsername,
+    EmptyPassword,
 };
 
 pub const EncodeError = error{
@@ -70,6 +74,12 @@ pub const Greeting = struct {
     }
 };
 
+pub const UsernamePasswordAuth = struct {
+    username: []const u8,
+    password: []const u8,
+    bytes_consumed: usize,
+};
+
 pub fn decodeGreeting(buf: []const u8) DecodeError!Greeting {
     if (buf.len < 2) return error.ShortBuffer;
     if (buf[0] != version) return error.BadVersion;
@@ -83,8 +93,32 @@ pub fn decodeGreeting(buf: []const u8) DecodeError!Greeting {
     };
 }
 
+pub fn decodeUsernamePasswordAuth(buf: []const u8) DecodeError!UsernamePasswordAuth {
+    if (buf.len < 2) return error.ShortBuffer;
+    if (buf[0] != username_password_auth_version) return error.BadAuthVersion;
+    const ulen = buf[1];
+    if (ulen == 0) return error.EmptyUsername;
+    if (buf.len < 2 + @as(usize, ulen) + 1) return error.ShortBuffer;
+    const username_start = 2;
+    const password_len_index = username_start + @as(usize, ulen);
+    const plen = buf[password_len_index];
+    if (plen == 0) return error.EmptyPassword;
+    const password_start = password_len_index + 1;
+    const end = password_start + @as(usize, plen);
+    if (buf.len < end) return error.ShortBuffer;
+    return .{
+        .username = buf[username_start .. username_start + ulen],
+        .password = buf[password_start..end],
+        .bytes_consumed = end,
+    };
+}
+
 pub fn encodeGreetingReply(method: Method) [2]u8 {
     return .{ version, @intFromEnum(method) };
+}
+
+pub fn encodeUsernamePasswordReply(succeeded: bool) [2]u8 {
+    return .{ username_password_auth_version, if (succeeded) 0x00 else 0x01 };
 }
 
 pub const Request = struct {
@@ -239,6 +273,26 @@ test "encodeGreetingReply no-acceptable" {
         &.{ 0x05, 0xFF },
         &encodeGreetingReply(.no_acceptable),
     );
+}
+
+test "decodeUsernamePasswordAuth parses RFC 1929 payload" {
+    const buf = [_]u8{ 0x01, 0x05, 'a', 'l', 'i', 'c', 'e', 0x06, 's', 'e', 'c', 'r', 'e', 't' };
+    const auth = try decodeUsernamePasswordAuth(&buf);
+    try std.testing.expectEqualStrings("alice", auth.username);
+    try std.testing.expectEqualStrings("secret", auth.password);
+    try std.testing.expectEqual(buf.len, auth.bytes_consumed);
+}
+
+test "decodeUsernamePasswordAuth rejects malformed payload" {
+    try std.testing.expectError(error.ShortBuffer, decodeUsernamePasswordAuth(&[_]u8{}));
+    try std.testing.expectError(error.BadAuthVersion, decodeUsernamePasswordAuth(&[_]u8{ 0x02, 0x01, 'a', 0x01, 'b' }));
+    try std.testing.expectError(error.EmptyUsername, decodeUsernamePasswordAuth(&[_]u8{ 0x01, 0x00, 0x01, 'b' }));
+    try std.testing.expectError(error.EmptyPassword, decodeUsernamePasswordAuth(&[_]u8{ 0x01, 0x01, 'a', 0x00 }));
+}
+
+test "encodeUsernamePasswordReply success and failure" {
+    try std.testing.expectEqualSlices(u8, &.{ 0x01, 0x00 }, &encodeUsernamePasswordReply(true));
+    try std.testing.expectEqualSlices(u8, &.{ 0x01, 0x01 }, &encodeUsernamePasswordReply(false));
 }
 
 test "decodeRequest CONNECT to IPv4" {

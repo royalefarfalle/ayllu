@@ -5,10 +5,16 @@
 
 const std = @import("std");
 const socks5 = @import("socks5.zig");
+const auth = @import("auth.zig");
 const relay = @import("relay.zig");
+
+pub const Config = struct {
+    auth: auth.Config = .none,
+};
 
 pub const GreetingError = error{
     NoAcceptableMethods,
+    CredentialsRejected,
 } || socks5.DecodeError || std.Io.Reader.Error || std.Io.Writer.Error;
 
 pub const RequestError = socks5.DecodeError || std.Io.Reader.Error;
@@ -22,7 +28,15 @@ pub fn handshake(
     client_r: *std.Io.Reader,
     client_w: *std.Io.Writer,
 ) HandshakeError!socks5.Request {
-    try negotiateMethod(client_r, client_w);
+    return handshakeWithConfig(client_r, client_w, .{});
+}
+
+pub fn handshakeWithConfig(
+    client_r: *std.Io.Reader,
+    client_w: *std.Io.Writer,
+    config: Config,
+) HandshakeError!socks5.Request {
+    try negotiateMethod(client_r, client_w, config);
     return try readRequest(client_r);
 }
 
@@ -33,6 +47,7 @@ pub fn handshake(
 pub fn negotiateMethod(
     client_r: *std.Io.Reader,
     client_w: *std.Io.Writer,
+    config: Config,
 ) GreetingError!void {
     // Greeting: 2 заголовочных байта + nmethods.
     const header = try client_r.peek(2);
@@ -42,13 +57,32 @@ pub fn negotiateMethod(
     const greeting_bytes = try client_r.take(2 + @as(usize, nmethods));
     const greeting = try socks5.decodeGreeting(greeting_bytes);
 
-    if (!greeting.offersNoAuth()) {
-        try client_w.writeAll(&socks5.encodeGreetingReply(.no_acceptable));
-        try client_w.flush();
-        return error.NoAcceptableMethods;
-    }
-    try client_w.writeAll(&socks5.encodeGreetingReply(.no_auth));
+    const selected_method: socks5.Method = switch (config.auth) {
+        .none => if (greeting.offersNoAuth()) .no_auth else {
+            try client_w.writeAll(&socks5.encodeGreetingReply(.no_acceptable));
+            try client_w.flush();
+            return error.NoAcceptableMethods;
+        },
+        .username_password => blk: {
+            if (std.mem.indexOfScalar(u8, greeting.methods, @intFromEnum(socks5.Method.username_password)) == null) {
+                try client_w.writeAll(&socks5.encodeGreetingReply(.no_acceptable));
+                try client_w.flush();
+                return error.NoAcceptableMethods;
+            }
+            break :blk socks5.Method.username_password;
+        },
+    };
+    try client_w.writeAll(&socks5.encodeGreetingReply(selected_method));
     try client_w.flush();
+
+    if (selected_method == .username_password) {
+        switch (config.auth) {
+            .username_password => |creds| if (!try authenticateUsernamePassword(client_r, client_w, creds)) {
+                return error.CredentialsRejected;
+            },
+            .none => unreachable,
+        }
+    }
 }
 
 /// Читает и декодирует SOCKS5 request уже после успешного method negotiation.
@@ -70,6 +104,27 @@ pub fn readRequest(client_r: *std.Io.Reader) RequestError!socks5.Request {
     };
     const req_bytes = try client_r.take(req_len);
     return try socks5.decodeRequest(req_bytes);
+}
+
+fn authenticateUsernamePassword(
+    client_r: *std.Io.Reader,
+    client_w: *std.Io.Writer,
+    creds: auth.Credentials,
+) (socks5.DecodeError || std.Io.Reader.Error || std.Io.Writer.Error)!bool {
+    const header = try client_r.peek(2);
+    if (header[0] != socks5.username_password_auth_version) return error.BadAuthVersion;
+    const ulen = header[1];
+    if (ulen == 0) return error.EmptyUsername;
+    const prefix_len = 2 + @as(usize, ulen) + 1;
+    const prefix = try client_r.peek(prefix_len);
+    const plen = prefix[prefix_len - 1];
+    if (plen == 0) return error.EmptyPassword;
+    const auth_bytes = try client_r.take(prefix_len + @as(usize, plen));
+    const req = try socks5.decodeUsernamePasswordAuth(auth_bytes);
+    const ok = creds.matches(req.username, req.password);
+    try client_w.writeAll(&socks5.encodeUsernamePasswordReply(ok));
+    try client_w.flush();
+    return ok;
 }
 
 /// Кодирует и отправляет reply на CONNECT; используется и при успехе, и
@@ -120,6 +175,11 @@ fn acceptOneSession(io: std.Io, server: *std.Io.net.Server) anyerror!void {
     try session(io, accepted.socket);
 }
 
+fn acceptOneSessionWithConfig(io: std.Io, server: *std.Io.net.Server, config: Config) anyerror!void {
+    const accepted = try server.accept(io);
+    try sessionWithConfig(io, accepted.socket, config);
+}
+
 fn connectUpstream(io: std.Io, address: socks5.Address, port: u16) !std.Io.net.Stream {
     switch (address) {
         .ipv4 => |bytes| {
@@ -141,6 +201,10 @@ fn connectUpstream(io: std.Io, address: socks5.Address, port: u16) !std.Io.net.S
 /// connect upstream → reply → bidirectional relay → close. Даёт ошибку
 /// обратно наверх, но сам закрывает оба сокета, чтобы клиент не зависал.
 pub fn session(io: std.Io, client_socket: std.Io.net.Socket) !void {
+    return sessionWithConfig(io, client_socket, .{});
+}
+
+pub fn sessionWithConfig(io: std.Io, client_socket: std.Io.net.Socket, config: Config) !void {
     const client_stream: std.Io.net.Stream = .{ .socket = client_socket };
     defer client_stream.close(io);
 
@@ -149,7 +213,8 @@ pub fn session(io: std.Io, client_socket: std.Io.net.Socket) !void {
     var client_reader = std.Io.net.Stream.Reader.init(client_stream, io, &cr_buf);
     var client_writer = std.Io.net.Stream.Writer.init(client_stream, io, &cw_buf);
 
-    negotiateMethod(&client_reader.interface, &client_writer.interface) catch |err| switch (err) {
+    negotiateMethod(&client_reader.interface, &client_writer.interface, config) catch |err| switch (err) {
+        error.CredentialsRejected => return err,
         error.NoAcceptableMethods => return err,
         else => return err,
     };
@@ -216,11 +281,32 @@ test "handshake happy path: no-auth greeting + CONNECT IPv4" {
     try std.testing.expectEqualSlices(u8, &.{ 0x05, 0x00 }, w.buffered()[0..2]);
 }
 
+test "handshake happy path: username/password auth + CONNECT IPv4" {
+    var backing: [512]u8 = undefined;
+    const greeting = &[_]u8{ 0x05, 0x01, 0x02 };
+    const auth_req = &[_]u8{ 0x01, 0x05, 'a', 'l', 'i', 'c', 'e', 0x06, 's', 'e', 'c', 'r', 'e', 't' };
+    const request = &[_]u8{ 0x05, 0x01, 0x00, 0x01, 1, 2, 3, 4, 0x01, 0xBB };
+    @memcpy(backing[0..greeting.len], greeting);
+    @memcpy(backing[greeting.len .. greeting.len + auth_req.len], auth_req);
+    @memcpy(backing[greeting.len + auth_req.len ..][0..request.len], request);
+    const bytes = backing[0 .. greeting.len + auth_req.len + request.len];
+    var r: std.Io.Reader = .fixed(bytes);
+
+    var out: [16]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&out);
+
+    const req = try handshakeWithConfig(&r, &w, .{
+        .auth = .{ .username_password = .{ .username = "alice", .password = "secret" } },
+    });
+    try std.testing.expectEqual(socks5.Command.connect, req.command);
+    try std.testing.expectEqualSlices(u8, &.{ 0x05, 0x02, 0x01, 0x00 }, w.buffered()[0..4]);
+}
+
 test "negotiateMethod rejects non-SOCKS preface without writing fingerprint bytes" {
     var r: std.Io.Reader = .fixed("GET / HTTP/1.1\r\n\r\n");
     var out: [8]u8 = undefined;
     var w: std.Io.Writer = .fixed(&out);
-    try std.testing.expectError(error.BadVersion, negotiateMethod(&r, &w));
+    try std.testing.expectError(error.BadVersion, negotiateMethod(&r, &w, .{}));
     try std.testing.expectEqual(@as(usize, 0), w.buffered().len);
 }
 
@@ -250,6 +336,21 @@ test "handshake sends no-acceptable when client omits no-auth" {
 
     try std.testing.expectError(error.NoAcceptableMethods, handshake(&r, &w));
     try std.testing.expectEqualSlices(u8, &.{ 0x05, 0xFF }, w.buffered()[0..2]);
+}
+
+test "negotiateMethod rejects bad username/password credentials" {
+    const greeting = &[_]u8{ 0x05, 0x01, 0x02 };
+    const auth_req = &[_]u8{ 0x01, 0x05, 'a', 'l', 'i', 'c', 'e', 0x05, 'w', 'r', 'o', 'n', 'g' };
+    var bytes: [32]u8 = undefined;
+    @memcpy(bytes[0..greeting.len], greeting);
+    @memcpy(bytes[greeting.len .. greeting.len + auth_req.len], auth_req);
+    var r: std.Io.Reader = .fixed(bytes[0 .. greeting.len + auth_req.len]);
+    var out: [8]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&out);
+    try std.testing.expectError(error.CredentialsRejected, negotiateMethod(&r, &w, .{
+        .auth = .{ .username_password = .{ .username = "alice", .password = "secret" } },
+    }));
+    try std.testing.expectEqualSlices(u8, &.{ 0x05, 0x02, 0x01, 0x01 }, w.buffered()[0..4]);
 }
 
 test "handshake rejects greeting with wrong version" {
@@ -341,6 +442,73 @@ test "session end-to-end proxies bytes to an upstream TCP server" {
 
     const method_reply = try client_reader.interface.take(2);
     try std.testing.expectEqualSlices(u8, &.{ 0x05, 0x00 }, method_reply);
+
+    const connect_reply = try client_reader.interface.take(10);
+    try std.testing.expectEqualSlices(u8, &.{ 0x05, 0x00, 0x00, 0x01 }, connect_reply[0..4]);
+
+    try client_writer.interface.writeAll("ping");
+    try client_writer.interface.flush();
+    const echoed = try client_reader.interface.take(4);
+    try std.testing.expectEqualStrings("ping", echoed);
+
+    client_stream.close(io);
+    try session_task.await(io);
+    try upstream_task.await(io);
+}
+
+test "session end-to-end proxies bytes with RFC 1929 auth enabled" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var upstream = try (@as(std.Io.net.IpAddress, .{
+        .ip4 = std.Io.net.Ip4Address.loopback(0),
+    })).listen(io, .{ .reuse_address = true });
+    defer upstream.deinit(io);
+
+    const upstream_port = upstream.socket.address.getPort();
+    var upstream_task = io.async(echoOnce, .{ io, &upstream, 4 });
+    errdefer upstream_task.cancel(io) catch {};
+
+    var proxy = try (@as(std.Io.net.IpAddress, .{
+        .ip4 = std.Io.net.Ip4Address.loopback(0),
+    })).listen(io, .{ .reuse_address = true });
+    defer proxy.deinit(io);
+    const proxy_port = proxy.socket.address.getPort();
+    var session_task = io.async(acceptOneSessionWithConfig, .{
+        io,
+        &proxy,
+        Config{
+            .auth = .{ .username_password = .{ .username = "alice", .password = "secret" } },
+        },
+    });
+    errdefer session_task.cancel(io) catch {};
+
+    const client_stream = try (@as(std.Io.net.IpAddress, .{
+        .ip4 = std.Io.net.Ip4Address.loopback(proxy_port),
+    })).connect(io, .{ .mode = .stream });
+    errdefer client_stream.close(io);
+
+    var cr_buf: [256]u8 = undefined;
+    var cw_buf: [256]u8 = undefined;
+    var client_reader = std.Io.net.Stream.Reader.init(client_stream, io, &cr_buf);
+    var client_writer = std.Io.net.Stream.Writer.init(client_stream, io, &cw_buf);
+
+    const greeting = [_]u8{ 0x05, 0x01, 0x02 };
+    const auth_req = [_]u8{ 0x01, 0x05, 'a', 'l', 'i', 'c', 'e', 0x06, 's', 'e', 'c', 'r', 'e', 't' };
+    var request = [_]u8{ 0x05, 0x01, 0x00, 0x01, 127, 0, 0, 1, 0, 0 };
+    std.mem.writeInt(u16, request[8..10], upstream_port, .big);
+
+    try client_writer.interface.writeAll(&greeting);
+    try client_writer.interface.writeAll(&auth_req);
+    try client_writer.interface.writeAll(&request);
+    try client_writer.interface.flush();
+
+    const method_reply = try client_reader.interface.take(2);
+    try std.testing.expectEqualSlices(u8, &.{ 0x05, 0x02 }, method_reply);
+
+    const auth_reply = try client_reader.interface.take(2);
+    try std.testing.expectEqualSlices(u8, &.{ 0x01, 0x00 }, auth_reply);
 
     const connect_reply = try client_reader.interface.take(10);
     try std.testing.expectEqualSlices(u8, &.{ 0x05, 0x00, 0x00, 0x01 }, connect_reply[0..4]);
