@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const socks5 = @import("socks5.zig");
+const relay = @import("relay.zig");
 
 pub const HandshakeError = error{
     NoAcceptableMethods,
@@ -79,6 +80,71 @@ fn makeHandshakeBytes(buf: []u8, greeting: []const u8, request: []const u8) []co
     @memcpy(buf[0..greeting.len], greeting);
     @memcpy(buf[greeting.len .. greeting.len + request.len], request);
     return buf[0 .. greeting.len + request.len];
+}
+
+fn connectUpstream(io: std.Io, address: socks5.Address, port: u16) !std.Io.net.Stream {
+    switch (address) {
+        .ipv4 => |bytes| {
+            const addr: std.Io.net.IpAddress = .{ .ip4 = .{ .bytes = bytes, .port = port } };
+            return addr.connect(io, .{ .mode = .stream });
+        },
+        .ipv6 => |bytes| {
+            const addr: std.Io.net.IpAddress = .{ .ip6 = .{ .bytes = bytes, .port = port } };
+            return addr.connect(io, .{ .mode = .stream });
+        },
+        .domain => |name| {
+            const host = try std.Io.net.HostName.init(name);
+            return host.connect(io, port, .{ .mode = .stream });
+        },
+    }
+}
+
+/// Полный жизненный цикл одного клиентского SOCKS5-соединения: handshake →
+/// connect upstream → reply → bidirectional relay → close. Даёт ошибку
+/// обратно наверх, но сам закрывает оба сокета, чтобы клиент не зависал.
+pub fn session(io: std.Io, client_socket: std.Io.net.Socket) !void {
+    const client_stream: std.Io.net.Stream = .{ .socket = client_socket };
+    defer client_stream.close(io);
+
+    var cr_buf: [4096]u8 = undefined;
+    var cw_buf: [4096]u8 = undefined;
+    var client_reader = std.Io.net.Stream.Reader.init(client_stream, io, &cr_buf);
+    var client_writer = std.Io.net.Stream.Writer.init(client_stream, io, &cw_buf);
+
+    const req = handshake(&client_reader.interface, &client_writer.interface) catch |err| {
+        sendReply(&client_writer.interface, errorToReply(err), socks5.zero_ipv4, 0) catch {};
+        return err;
+    };
+
+    if (req.command != .connect) {
+        try sendReply(&client_writer.interface, .command_not_supported, socks5.zero_ipv4, 0);
+        return error.UnsupportedCommand;
+    }
+
+    const upstream_stream = connectUpstream(io, req.address, req.port) catch |err| {
+        const reply: socks5.Reply = if (err == error.ConnectionRefused)
+            .connection_refused
+        else if (err == error.NetworkUnreachable)
+            .network_unreachable
+        else
+            .host_unreachable;
+        try sendReply(&client_writer.interface, reply, socks5.zero_ipv4, 0);
+        return err;
+    };
+    defer upstream_stream.close(io);
+
+    try sendReply(&client_writer.interface, .succeeded, socks5.zero_ipv4, 0);
+
+    var ur_buf: [4096]u8 = undefined;
+    var uw_buf: [4096]u8 = undefined;
+    var upstream_reader = std.Io.net.Stream.Reader.init(upstream_stream, io, &ur_buf);
+    var upstream_writer = std.Io.net.Stream.Writer.init(upstream_stream, io, &uw_buf);
+
+    try relay.bidirectional(
+        io,
+        .{ .reader = &client_reader.interface, .writer = &client_writer.interface },
+        .{ .reader = &upstream_reader.interface, .writer = &upstream_writer.interface },
+    );
 }
 
 test "handshake happy path: no-auth greeting + CONNECT IPv4" {

@@ -30,12 +30,33 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe);
 
+    const proxy_exe = b.addExecutable(.{
+        .name = "ayllu-proxy",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("cli/proxy-main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "ayllu-proxy", .module = proxy_mod },
+                .{ .name = "ayllu", .module = ayllu_mod },
+            },
+        }),
+    });
+    b.installArtifact(proxy_exe);
+
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);
 
     const run_step = b.step("run", "Run the ayllu CLI");
     run_step.dependOn(&run_cmd.step);
+
+    const run_proxy = b.addRunArtifact(proxy_exe);
+    run_proxy.step.dependOn(b.getInstallStep());
+    if (b.args) |args| run_proxy.addArgs(args);
+
+    const run_proxy_step = b.step("run-proxy", "Run the ayllu-proxy SOCKS5 daemon");
+    run_proxy_step.dependOn(&run_proxy.step);
 
     const mod_tests = b.addTest(.{ .root_module = ayllu_mod });
     const run_mod_tests = b.addRunArtifact(mod_tests);
