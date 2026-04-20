@@ -38,6 +38,12 @@ pub const Registry = struct {
     /// counter so operators can tell REALITY-specific probes apart
     /// from the LegacyHttp admission traffic.
     admission_reality_rejected_total: Counter = .{},
+    /// Bumped when a REALITY session fails AFTER we've committed to
+    /// pivot (ServerHello on the wire). At that point we can't route to
+    /// cover anymore, so the session goes `.silent` — separate from
+    /// `_rejected_total` because the failure modes are different
+    /// (handshake-phase MAC failure, TlsReader truncation, alloc OOM).
+    admission_reality_handshake_failed_total: Counter = .{},
 
     /// Render the full registry in Prometheus text format (openmetrics 0.0.4).
     pub fn render(self: *const Registry, w: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -49,6 +55,7 @@ pub const Registry = struct {
         try renderCounter(w, "ayllu_handshake_timeouts_total", self.handshake_timeouts_total.load());
         try renderCounter(w, "ayllu_bytes_relayed_total", self.bytes_relayed_total.load());
         try renderCounter(w, "ayllu_admission_reality_rejected_total", self.admission_reality_rejected_total.load());
+        try renderCounter(w, "ayllu_admission_reality_handshake_failed_total", self.admission_reality_handshake_failed_total.load());
     }
 };
 

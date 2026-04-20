@@ -69,6 +69,11 @@ pub const AdmissionContext = struct {
     writer: *std.Io.Writer,
     net_stream: *const std.Io.net.Stream,
     peer_key: rate_limit.PrefixKey,
+    /// Long-lived allocator for per-session heap that must outlive the
+    /// `admit` call (e.g. REALITY's TLS record layers feeding
+    /// `Pivoted.on_close`). Transports that pivot with raw reader/writer
+    /// references don't need to touch it.
+    allocator: std.mem.Allocator,
 };
 
 pub const OuterTransport = struct {
@@ -124,6 +129,7 @@ test "OuterTransport vtable dispatches name() and admit() through the pointer" {
         .writer = &fake_writer,
         .net_stream = &fake_stream,
         .peer_key = rate_limit.ipv4_zero_prefix,
+        .allocator = std.testing.allocator,
     });
     try std.testing.expectEqual(AdmitOutcome.silent, outcome);
     try std.testing.expectEqual(@as(u32, 1), dummy.name_calls);

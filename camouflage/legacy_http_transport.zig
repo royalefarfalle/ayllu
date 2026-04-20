@@ -201,6 +201,7 @@ test "LegacyHttpTransport: admit returns fallback on malformed header (no CRLFCR
         .writer = &fixed_writer,
         .net_stream = &stream,
         .peer_key = @import("rate_limit.zig").ipv4_zero_prefix,
+        .allocator = std.testing.allocator,
     });
     try std.testing.expectEqual(
         std.meta.Tag(transport.AdmitOutcome).fallback,
@@ -245,6 +246,7 @@ test "LegacyHttpTransport: admit returns fallback when pivot.classify rejects th
         .writer = &fixed_writer,
         .net_stream = &stream,
         .peer_key = @import("rate_limit.zig").ipv4_zero_prefix,
+        .allocator = std.testing.allocator,
     });
     try std.testing.expectEqual(
         std.meta.Tag(transport.AdmitOutcome).fallback,

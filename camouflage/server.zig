@@ -57,6 +57,11 @@ pub const State = struct {
     replay_cache: tokens.ReplayCache(replay_cache_entries) = .{},
     limiter: ?rate_limit.RateLimiter = null,
     metrics: ?*metrics_mod.Registry = null,
+    /// Long-lived allocator handed to the dispatcher for per-session
+    /// heap (currently only REALITY's TLS record layers). Must outlive
+    /// every session. Defaults to page_allocator for test paths that
+    /// never pivot through REALITY; CLI wires in a tracked gpa.
+    allocator: std.mem.Allocator = std.heap.page_allocator,
 
     pub fn initLimiter(self: *State, allocator: std.mem.Allocator) void {
         self.limiter = rate_limit.RateLimiter.init(allocator, self.config.rate_limit);
@@ -119,6 +124,7 @@ pub fn dispatch(
         .writer = &writer.interface,
         .net_stream = &client_stream,
         .peer_key = peer_key,
+        .allocator = state.allocator,
     }) catch |err| return err;
 
     switch (outcome) {

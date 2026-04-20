@@ -148,6 +148,19 @@ pub fn main(init: std.process.Init) !void {
     try reality_config.validate();
 
     var registry: ayllu_camouflage.metrics.Registry = .{};
+
+    // Generate a fresh Ed25519 self-signed stub cert per process start.
+    // REALITY normally proxies the cover host's real cert — C6's harvest
+    // pipeline replaces this stub with captured bytes.
+    const now_unix_s: i64 = @intCast(@divFloor(std.Io.Clock.real.now(io).nanoseconds, std.time.ns_per_s));
+    var cert_stub = try ayllu_camouflage.tls.cert_stub.CertStub.generate(
+        gpa,
+        io,
+        reality_config.server_names[0],
+        now_unix_s,
+    );
+    defer cert_stub.deinit();
+
     var state: ayllu_camouflage.server.State = .{
         .config = .{
             .pivot = .{
@@ -160,6 +173,7 @@ pub fn main(init: std.process.Init) !void {
             .rate_limit = rate_limit_cfg,
         },
         .metrics = &registry,
+        .allocator = gpa,
     };
     state.initLimiter(gpa);
     defer state.deinitLimiter();
@@ -181,7 +195,7 @@ pub fn main(init: std.process.Init) !void {
     var reality_server_storage: ?std.Io.net.Server = null;
     if (reality_listen_addr) |r_addr| {
         reality_server_storage = try r_addr.listen(io, .{ .reuse_address = true });
-        _ = io.async(realityAcceptLoop, .{ io, &reality_server_storage.?, &state });
+        _ = io.async(realityAcceptLoop, .{ io, &reality_server_storage.?, &state, &cert_stub });
     }
     defer if (reality_server_storage) |*s| s.deinit(io);
 
@@ -212,6 +226,7 @@ fn realityAcceptLoop(
     io: std.Io,
     server: *std.Io.net.Server,
     state: *ayllu_camouflage.server.State,
+    cert_stub: *const ayllu_camouflage.tls.cert_stub.CertStub,
 ) !void {
     while (true) {
         const client_stream = server.accept(io) catch |err| switch (err) {
@@ -221,13 +236,19 @@ fn realityAcceptLoop(
                 continue;
             },
         };
-        _ = io.async(realitySessionWrapper, .{ io, client_stream.socket, state });
+        _ = io.async(realitySessionWrapper, .{ io, client_stream.socket, state, cert_stub });
     }
 }
 
-fn realitySessionWrapper(io: std.Io, socket: std.Io.net.Socket, state: *ayllu_camouflage.server.State) void {
+fn realitySessionWrapper(
+    io: std.Io,
+    socket: std.Io.net.Socket,
+    state: *ayllu_camouflage.server.State,
+    cert_stub: *const ayllu_camouflage.tls.cert_stub.CertStub,
+) void {
     var xport = ayllu_camouflage.tls.reality_transport.RealityTransport.init(.{
         .config = state.config.pivot.reality,
+        .cert_stub = cert_stub,
         .metrics = state.metrics,
     });
     ayllu_camouflage.server.dispatch(io, socket, state, xport.outerTransport()) catch |err| switch (err) {
