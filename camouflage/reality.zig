@@ -40,6 +40,17 @@ pub const ShortId = struct {
     }
 };
 
+/// Inner protocol spoken on top of the REALITY TLS stream once the
+/// handshake completes. `socks5` keeps the pre-C5b behaviour: the
+/// dispatcher runs a full SOCKS5 greeting/request on the TLS-wrapped
+/// stream. `vless` parses a VLESS v1 request header from the first
+/// app_data record, gates on `vless_uuid`, and pivots directly to the
+/// decoded target — see [../tls/reality_transport.zig](../tls/reality_transport.zig).
+pub const InnerProtocol = enum {
+    socks5,
+    vless,
+};
+
 pub const Config = struct {
     target: Target,
     server_names: []const []const u8,
@@ -48,6 +59,14 @@ pub const Config = struct {
     max_client_version: ?std.SemanticVersion = null,
     max_time_diff_ms: u64 = 0,
     short_ids: []const ShortId,
+    /// Inner protocol the cooperating client is expected to speak once
+    /// the TLS handshake finishes. Defaults to SOCKS5 for backwards
+    /// compatibility with the pre-C5b `ayllu-camouflage-client`.
+    inner_protocol: InnerProtocol = .socks5,
+    /// Required when `inner_protocol == .vless`. 16-byte UUID the
+    /// transport compares (constant-time) against `VlessHeader.uuid`;
+    /// a mismatch drops the session silently. Ignored for SOCKS5 inner.
+    vless_uuid: ?[16]u8 = null,
 
     pub fn validate(self: Config) ValidateError!void {
         if (self.target.host.len == 0 or self.target.port == 0) return error.InvalidTarget;
@@ -60,6 +79,9 @@ pub const Config = struct {
             if (self.min_client_version.?.order(self.max_client_version.?) == .gt) {
                 return error.InvalidVersionRange;
             }
+        }
+        if (self.inner_protocol == .vless and self.vless_uuid == null) {
+            return error.MissingVlessUuid;
         }
     }
 
@@ -105,6 +127,7 @@ pub const ValidateError = error{
     InvalidShortId,
     InvalidVersionRange,
     InvalidTarget,
+    MissingVlessUuid,
 } || std.crypto.errors.IdentityElementError;
 
 pub const AuthorizeError = ValidateError || error{
@@ -177,6 +200,37 @@ pub fn parseTarget(spec: []const u8) ParseError!Target {
     const port = std.fmt.parseInt(u16, spec[colon + 1 ..], 10) catch return error.InvalidTarget;
     if (port == 0) return error.InvalidTarget;
     return .{ .host = spec[0..colon], .port = port };
+}
+
+pub const UuidParseError = error{
+    InvalidUuidLength,
+    InvalidUuidChar,
+};
+
+/// Parse a VLESS UUID from either the canonical dashed form
+/// (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`, 36 chars) or a flat 32-hex
+/// form. Case-insensitive.
+pub fn parseVlessUuid(encoded: []const u8) UuidParseError![16]u8 {
+    var hex_only: [32]u8 = undefined;
+    switch (encoded.len) {
+        32 => @memcpy(&hex_only, encoded),
+        36 => {
+            // Dashes must be at positions 8, 13, 18, 23.
+            if (encoded[8] != '-' or encoded[13] != '-' or encoded[18] != '-' or encoded[23] != '-') {
+                return error.InvalidUuidChar;
+            }
+            var w: usize = 0;
+            for (encoded, 0..) |c, i| {
+                if (i == 8 or i == 13 or i == 18 or i == 23) continue;
+                hex_only[w] = c;
+                w += 1;
+            }
+        },
+        else => return error.InvalidUuidLength,
+    }
+    var out: [16]u8 = undefined;
+    _ = std.fmt.hexToBytes(&out, &hex_only) catch return error.InvalidUuidChar;
+    return out;
 }
 
 pub fn authorize(config: Config, hello: Hello, now_ms: i64) AuthorizeError!SessionMaterial {
@@ -498,4 +552,69 @@ test "client and server derive identical session material" {
     const server_material = try authorize(server_cfg, hello, hello.unix_ms);
     const client_material = try deriveClientMaterial(public_cfg, client_private, hello);
     try std.testing.expectEqualDeep(server_material, client_material);
+}
+
+test "parseVlessUuid accepts dashed and flat 32-hex forms" {
+    const dashed = try parseVlessUuid("b831381d-6324-4d53-ad4f-8cda48b30811");
+    const flat = try parseVlessUuid("b831381d63244d53ad4f8cda48b30811");
+    try std.testing.expectEqualSlices(u8, &dashed, &flat);
+
+    const expected = [_]u8{ 0xb8, 0x31, 0x38, 0x1d, 0x63, 0x24, 0x4d, 0x53, 0xad, 0x4f, 0x8c, 0xda, 0x48, 0xb3, 0x08, 0x11 };
+    try std.testing.expectEqualSlices(u8, &expected, &dashed);
+}
+
+test "parseVlessUuid rejects bad length and misplaced dashes" {
+    try std.testing.expectError(error.InvalidUuidLength, parseVlessUuid("abc"));
+    // 40-char string → neither 32 nor 36 → length error
+    try std.testing.expectError(
+        error.InvalidUuidLength,
+        parseVlessUuid("b831381d63244d53ad4f8cda48b3081100000000"),
+    );
+    // 36 chars with dashes in wrong positions → InvalidUuidChar
+    try std.testing.expectError(
+        error.InvalidUuidChar,
+        parseVlessUuid("b831381d6-3244d53-ad4f-8cda-48b30811"),
+    );
+}
+
+test "parseVlessUuid rejects non-hex bytes in flat form" {
+    try std.testing.expectError(
+        error.InvalidUuidChar,
+        parseVlessUuid("ZZ31381d63244d53ad4f8cda48b30811"),
+    );
+}
+
+test "Config.validate: vless inner without uuid => MissingVlessUuid" {
+    const cfg: Config = .{
+        .target = .{ .host = "example.com", .port = 443 },
+        .server_names = &.{"example.com"},
+        .private_key = hex32("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+        .short_ids = &[_]ShortId{try parseShortId("aabb")},
+        .inner_protocol = .vless,
+        // vless_uuid = null → should fail
+    };
+    try std.testing.expectError(error.MissingVlessUuid, cfg.validate());
+}
+
+test "Config.validate: vless inner with uuid is accepted" {
+    const cfg: Config = .{
+        .target = .{ .host = "example.com", .port = 443 },
+        .server_names = &.{"example.com"},
+        .private_key = hex32("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+        .short_ids = &[_]ShortId{try parseShortId("aabb")},
+        .inner_protocol = .vless,
+        .vless_uuid = try parseVlessUuid("b831381d-6324-4d53-ad4f-8cda48b30811"),
+    };
+    try cfg.validate();
+}
+
+test "Config.validate: socks5 inner ignores vless_uuid state" {
+    const cfg: Config = .{
+        .target = .{ .host = "example.com", .port = 443 },
+        .server_names = &.{"example.com"},
+        .private_key = hex32("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+        .short_ids = &[_]ShortId{try parseShortId("aabb")},
+        // inner_protocol defaults to .socks5
+    };
+    try cfg.validate();
 }

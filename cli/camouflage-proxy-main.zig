@@ -29,6 +29,8 @@ pub fn main(init: std.process.Init) !void {
     var pool_entries = std.ArrayList(ayllu_camouflage.cover_pool.WeightedCover).empty;
     var rate_limit_cfg: ayllu_camouflage.rate_limit.Config = .{};
     var metrics_listen: ?std.Io.net.IpAddress = null;
+    var inner_protocol: ayllu_camouflage.reality.InnerProtocol = .socks5;
+    var vless_uuid: ?[16]u8 = null;
 
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
@@ -49,16 +51,17 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, args[i], "--inner-protocol")) {
             i += 1;
             if (i >= args.len) return error.MissingInnerProtocolValue;
-            // C5b wires VLESS to the pivoted stream; for now only
-            // socks5 is supported. The flag reserves the syntax so
-            // scripts written today keep working once VLESS lands.
             if (std.mem.eql(u8, args[i], "socks5")) {
-                // no-op (default)
+                inner_protocol = .socks5;
             } else if (std.mem.eql(u8, args[i], "vless")) {
-                return error.VlessInnerProtocolNotYetSupported;
+                inner_protocol = .vless;
             } else {
                 return error.UnknownInnerProtocol;
             }
+        } else if (std.mem.eql(u8, args[i], "--vless-uuid")) {
+            i += 1;
+            if (i >= args.len) return error.MissingVlessUuidValue;
+            vless_uuid = ayllu_camouflage.reality.parseVlessUuid(args[i]) catch return error.BadVlessUuidValue;
         } else if (std.mem.eql(u8, args[i], "--target")) {
             i += 1;
             if (i >= args.len) return error.MissingTargetValue;
@@ -144,6 +147,8 @@ pub fn main(init: std.process.Init) !void {
         .max_client_version = max_client_version,
         .max_time_diff_ms = max_time_diff_ms,
         .short_ids = short_ids.items,
+        .inner_protocol = inner_protocol,
+        .vless_uuid = vless_uuid,
     };
     try reality_config.validate();
 
@@ -284,8 +289,11 @@ fn printUsage(io: std.Io) !void {
         \\  --reality-listen HOST:PORT optional second listener speaking TLS 1.3
         \\                             REALITY (Xray v25.x wire-compat).
         \\  --inner-protocol {socks5|vless}  inner protocol inside the
-        \\                             REALITY stream. Only socks5 is wired in
-        \\                             this build; vless lands in C5b.
+        \\                             REALITY stream. Default socks5.
+        \\  --vless-uuid UUID          required when --inner-protocol=vless.
+        \\                             Accepts the canonical dashed form
+        \\                             (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)
+        \\                             or the flat 32-hex form.
         \\  --auth-file PATH           inner SOCKS username:password file
         \\  --max-time-diff-ms N       clock skew allowance (default 5000)
         \\  --token-slot-ms N          token slot size (default 1000)
