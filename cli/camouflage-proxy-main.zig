@@ -31,6 +31,7 @@ pub fn main(init: std.process.Init) !void {
     var metrics_listen: ?std.Io.net.IpAddress = null;
     var inner_protocol: ayllu_camouflage.reality.InnerProtocol = .socks5;
     var vless_uuid: ?[16]u8 = null;
+    var cert_file_path: ?[]const u8 = null;
 
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
@@ -62,6 +63,10 @@ pub fn main(init: std.process.Init) !void {
             i += 1;
             if (i >= args.len) return error.MissingVlessUuidValue;
             vless_uuid = ayllu_camouflage.reality.parseVlessUuid(args[i]) catch return error.BadVlessUuidValue;
+        } else if (std.mem.eql(u8, args[i], "--cert-file")) {
+            i += 1;
+            if (i >= args.len) return error.MissingCertFileValue;
+            cert_file_path = args[i];
         } else if (std.mem.eql(u8, args[i], "--target")) {
             i += 1;
             if (i >= args.len) return error.MissingTargetValue;
@@ -154,17 +159,21 @@ pub fn main(init: std.process.Init) !void {
 
     var registry: ayllu_camouflage.metrics.Registry = .{};
 
-    // Generate a fresh Ed25519 self-signed stub cert per process start.
-    // REALITY normally proxies the cover host's real cert — C6's harvest
-    // pipeline replaces this stub with captured bytes.
+    // Select the REALITY certificate source: operator-supplied DER via
+    // `--cert-file` when given, otherwise a fresh Ed25519 self-signed
+    // stub generated per process start (C6's harvest pipeline will add
+    // a third variant later).
     const now_unix_s: i64 = @intCast(@divFloor(std.Io.Clock.real.now(io).nanoseconds, std.time.ns_per_s));
-    var cert_stub = try ayllu_camouflage.tls.cert_stub.CertStub.generate(
-        gpa,
-        io,
-        reality_config.server_names[0],
-        now_unix_s,
-    );
-    defer cert_stub.deinit();
+    var cert_source: ayllu_camouflage.tls.cert_source.CertSource = if (cert_file_path) |path|
+        .{ .external = try ayllu_camouflage.tls.cert_source.ExternalCert.loadFromFile(gpa, io, path) }
+    else
+        .{ .stub = try ayllu_camouflage.tls.cert_stub.CertStub.generate(
+            gpa,
+            io,
+            reality_config.server_names[0],
+            now_unix_s,
+        ) };
+    defer cert_source.deinit();
 
     var state: ayllu_camouflage.server.State = .{
         .config = .{
@@ -200,7 +209,7 @@ pub fn main(init: std.process.Init) !void {
     var reality_server_storage: ?std.Io.net.Server = null;
     if (reality_listen_addr) |r_addr| {
         reality_server_storage = try r_addr.listen(io, .{ .reuse_address = true });
-        _ = io.async(realityAcceptLoop, .{ io, &reality_server_storage.?, &state, &cert_stub });
+        _ = io.async(realityAcceptLoop, .{ io, &reality_server_storage.?, &state, &cert_source });
     }
     defer if (reality_server_storage) |*s| s.deinit(io);
 
@@ -231,7 +240,7 @@ fn realityAcceptLoop(
     io: std.Io,
     server: *std.Io.net.Server,
     state: *ayllu_camouflage.server.State,
-    cert_stub: *const ayllu_camouflage.tls.cert_stub.CertStub,
+    cert_source: *const ayllu_camouflage.tls.cert_source.CertSource,
 ) !void {
     while (true) {
         const client_stream = server.accept(io) catch |err| switch (err) {
@@ -241,7 +250,7 @@ fn realityAcceptLoop(
                 continue;
             },
         };
-        _ = io.async(realitySessionWrapper, .{ io, client_stream.socket, state, cert_stub });
+        _ = io.async(realitySessionWrapper, .{ io, client_stream.socket, state, cert_source });
     }
 }
 
@@ -249,11 +258,11 @@ fn realitySessionWrapper(
     io: std.Io,
     socket: std.Io.net.Socket,
     state: *ayllu_camouflage.server.State,
-    cert_stub: *const ayllu_camouflage.tls.cert_stub.CertStub,
+    cert_source: *const ayllu_camouflage.tls.cert_source.CertSource,
 ) void {
     var xport = ayllu_camouflage.tls.reality_transport.RealityTransport.init(.{
         .config = state.config.pivot.reality,
-        .cert_stub = cert_stub,
+        .cert_source = cert_source,
         .metrics = state.metrics,
     });
     ayllu_camouflage.server.dispatch(io, socket, state, xport.outerTransport()) catch |err| switch (err) {
@@ -294,6 +303,10 @@ fn printUsage(io: std.Io) !void {
         \\                             Accepts the canonical dashed form
         \\                             (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)
         \\                             or the flat 32-hex form.
+        \\  --cert-file PATH           load server certificate as DER bytes
+        \\                             (default: generate Ed25519 self-signed
+        \\                             stub per process start; C6 cert harvest
+        \\                             will add on-the-fly capture).
         \\  --auth-file PATH           inner SOCKS username:password file
         \\  --max-time-diff-ms N       clock skew allowance (default 5000)
         \\  --token-slot-ms N          token slot size (default 1000)

@@ -12,6 +12,7 @@ pub const xray_wire = @import("xray_wire.zig");
 pub const reality_transport = @import("reality_transport.zig");
 pub const stream = @import("stream.zig");
 pub const cert_stub = @import("cert_stub.zig");
+pub const cert_source = @import("cert_source.zig");
 
 test {
     _ = record;
@@ -22,5 +23,6 @@ test {
     _ = reality_transport;
     _ = stream;
     _ = cert_stub;
+    _ = cert_source;
     _ = @import("xray_v25_vectors.zig");
 }

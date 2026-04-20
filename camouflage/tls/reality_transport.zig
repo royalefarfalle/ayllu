@@ -33,6 +33,7 @@ const xray_wire = @import("xray_wire.zig");
 const keys_mod = @import("keys.zig");
 const stream_mod = @import("stream.zig");
 const cert_stub_mod = @import("cert_stub.zig");
+const cert_source_mod = @import("cert_source.zig");
 const vless_mod = @import("../vless.zig");
 
 pub const alpn_scratch_capacity: usize = 8;
@@ -67,12 +68,12 @@ pub const SessionState = struct {
 };
 
 /// Shared state handed to every `RealityTransport` instance. `config`
-/// and `cert_stub` are borrowed — the caller (typically `State`) owns
+/// and `cert_source` are borrowed — the caller (typically `State`) owns
 /// them. `metrics` is optional; when present the transport bumps
 /// REALITY-specific counters.
 pub const Shared = struct {
     config: reality.Config,
-    cert_stub: *const cert_stub_mod.CertStub,
+    cert_source: *const cert_source_mod.CertSource,
     metrics: ?*metrics_mod.Registry = null,
 };
 
@@ -288,10 +289,10 @@ pub const RealityTransport = struct {
         try emitEncryptedHandshake(&server_hs_layer, ee_wrapped_buf[0..ee_wrapped_len], admission.writer);
 
         // ----- Certificate -----
-        const cert_der = self.shared.cert_stub.cert_der;
-        var cert_body_buf: [16 + cert_stub_mod.max_cert_der]u8 = undefined;
+        const cert_der = self.shared.cert_source.certDer();
+        var cert_body_buf: [16 + cert_source_mod.max_cert_der]u8 = undefined;
         const cert_body_len = encodeCertificateBody(&cert_body_buf, cert_der);
-        var cert_wrapped_buf: [16 + cert_stub_mod.max_cert_der]u8 = undefined;
+        var cert_wrapped_buf: [16 + cert_source_mod.max_cert_der]u8 = undefined;
         const cert_wrapped_len = try server_hello_mod.wrapHandshake(
             &cert_wrapped_buf,
             .certificate,
@@ -302,7 +303,7 @@ pub const RealityTransport = struct {
 
         // ----- CertificateVerify -----
         const transcript_at_cv = ts.peek();
-        const sig_bytes = try self.shared.cert_stub.signCertificateVerify(&transcript_at_cv);
+        const sig_bytes = try self.shared.cert_source.signCertificateVerify(&transcript_at_cv);
 
         var cv_body_buf: [4 + 64]u8 = undefined;
         std.mem.writeInt(u16, cv_body_buf[0..2], 0x0807, .big); // ed25519 signature scheme
@@ -518,8 +519,8 @@ fn makeTestCtx() !TestCtx {
     };
 }
 
-fn makeStubCertStub(io: std.Io) !cert_stub_mod.CertStub {
-    return try cert_stub_mod.CertStub.generate(testing.allocator, io, "ayllu-test", 1_712_000_000);
+fn makeStubCertSource(io: std.Io) !cert_source_mod.CertSource {
+    return .{ .stub = try cert_stub_mod.CertStub.generate(testing.allocator, io, "ayllu-test", 1_712_000_000) };
 }
 
 /// Build a full TLS 1.3 handshake record carrying a ClientHello. Adds
@@ -655,11 +656,11 @@ test "RealityTransport.name() returns \"reality\" through the vtable" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var cert = try makeStubCertStub(io);
+    var cert = try makeStubCertSource(io);
     defer cert.deinit();
 
     const ctx = try makeTestCtx();
-    var xport = RealityTransport.init(.{ .config = ctx.config(0), .cert_stub = &cert });
+    var xport = RealityTransport.init(.{ .config = ctx.config(0), .cert_source = &cert });
     const t = xport.outerTransport();
     try testing.expectEqualStrings("reality", t.name());
 }
@@ -668,7 +669,7 @@ test "RealityTransport.admit: non-TLS garbage => fallback with buffered bytes" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var cert = try makeStubCertStub(io);
+    var cert = try makeStubCertSource(io);
     defer cert.deinit();
 
     const garbage = "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
@@ -678,7 +679,7 @@ test "RealityTransport.admit: non-TLS garbage => fallback with buffered bytes" {
     const net_stream: std.Io.net.Stream = .{ .socket = undefined };
 
     const ctx = try makeTestCtx();
-    var xport = RealityTransport.init(.{ .config = ctx.config(0), .cert_stub = &cert });
+    var xport = RealityTransport.init(.{ .config = ctx.config(0), .cert_source = &cert });
 
     const outcome = try xport.admit(.{
         .io = io,
@@ -699,7 +700,7 @@ test "RealityTransport.admit: SNI not in config => fallback" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var cert = try makeStubCertStub(io);
+    var cert = try makeStubCertSource(io);
     defer cert.deinit();
 
     const ctx = try makeTestCtx();
@@ -717,7 +718,7 @@ test "RealityTransport.admit: SNI not in config => fallback" {
     var w: std.Io.Writer = .fixed(&wbuf);
     const net_stream: std.Io.net.Stream = .{ .socket = undefined };
 
-    var xport = RealityTransport.init(.{ .config = cfg, .cert_stub = &cert });
+    var xport = RealityTransport.init(.{ .config = cfg, .cert_source = &cert });
 
     const outcome = try xport.admit(.{
         .io = io,
@@ -739,7 +740,7 @@ test "RealityTransport.admit: bad AuthKey MAC => fallback with original bytes" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var cert = try makeStubCertStub(io);
+    var cert = try makeStubCertSource(io);
     defer cert.deinit();
 
     const ctx = try makeTestCtx();
@@ -761,7 +762,7 @@ test "RealityTransport.admit: bad AuthKey MAC => fallback with original bytes" {
     var w: std.Io.Writer = .fixed(&wbuf);
     const net_stream: std.Io.net.Stream = .{ .socket = undefined };
 
-    var xport = RealityTransport.init(.{ .config = cfg, .cert_stub = &cert });
+    var xport = RealityTransport.init(.{ .config = cfg, .cert_source = &cert });
     const outcome = try xport.admit(.{
         .io = io,
         .reader = &r,
@@ -782,7 +783,7 @@ test "RealityTransport.admit: malformed record header (wrong version) => fallbac
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var cert = try makeStubCertStub(io);
+    var cert = try makeStubCertSource(io);
     defer cert.deinit();
 
     const bad = [_]u8{ 22, 0x02, 0x02, 0x00, 0x08, 0, 0, 0, 0, 0, 0, 0, 0 };
@@ -792,7 +793,7 @@ test "RealityTransport.admit: malformed record header (wrong version) => fallbac
     const net_stream: std.Io.net.Stream = .{ .socket = undefined };
 
     const ctx = try makeTestCtx();
-    var xport = RealityTransport.init(.{ .config = ctx.config(0), .cert_stub = &cert });
+    var xport = RealityTransport.init(.{ .config = ctx.config(0), .cert_source = &cert });
 
     const outcome = try xport.admit(.{
         .io = io,
@@ -812,7 +813,7 @@ test "RealityTransport.admit: fallback bumps admission_reality_rejected_total vi
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var cert = try makeStubCertStub(io);
+    var cert = try makeStubCertSource(io);
     defer cert.deinit();
 
     const garbage = "GET / HTTP/1.1\r\n\r\n";
@@ -823,7 +824,7 @@ test "RealityTransport.admit: fallback bumps admission_reality_rejected_total vi
 
     var registry: metrics.Registry = .{};
     const ctx = try makeTestCtx();
-    var xport = RealityTransport.init(.{ .config = ctx.config(0), .cert_stub = &cert, .metrics = &registry });
+    var xport = RealityTransport.init(.{ .config = ctx.config(0), .cert_source = &cert, .metrics = &registry });
 
     const outcome = try xport.admit(.{
         .io = io,
@@ -845,7 +846,7 @@ test "RealityTransport.admit: truncated record (short read) => EndOfStream" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var cert = try makeStubCertStub(io);
+    var cert = try makeStubCertSource(io);
     defer cert.deinit();
 
     const short = [_]u8{ 22, 0x03, 0x03 };
@@ -855,7 +856,7 @@ test "RealityTransport.admit: truncated record (short read) => EndOfStream" {
     const net_stream: std.Io.net.Stream = .{ .socket = undefined };
 
     const ctx = try makeTestCtx();
-    var xport = RealityTransport.init(.{ .config = ctx.config(0), .cert_stub = &cert });
+    var xport = RealityTransport.init(.{ .config = ctx.config(0), .cert_source = &cert });
 
     try testing.expectError(error.EndOfStream, xport.admit(.{
         .io = io,
@@ -887,7 +888,7 @@ test "RealityTransport.admit: unsupported cipher offered => fallback" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var cert = try makeStubCertStub(io);
+    var cert = try makeStubCertSource(io);
     defer cert.deinit();
 
     // Build a CH that offers ONLY 0x1302 (AES256-GCM-SHA384). Our
@@ -954,7 +955,7 @@ test "RealityTransport.admit: unsupported cipher offered => fallback" {
     // independent of validation order, build a CH with an authorized
     // session_id too. For simplicity we use a random sid_zero_like
     // here; the outcome must be fallback regardless of MAC state.
-    var xport = RealityTransport.init(.{ .config = ctx.config(0), .cert_stub = &cert });
+    var xport = RealityTransport.init(.{ .config = ctx.config(0), .cert_source = &cert });
     const outcome = try xport.admit(.{
         .io = io,
         .reader = &r,
@@ -974,7 +975,7 @@ test "RealityTransport.admit: valid CH + garbage client-finished => silent with 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var cert = try makeStubCertStub(io);
+    var cert = try makeStubCertSource(io);
     defer cert.deinit();
 
     const ctx = try makeTestCtx();
@@ -1003,7 +1004,7 @@ test "RealityTransport.admit: valid CH + garbage client-finished => silent with 
     const net_stream: std.Io.net.Stream = .{ .socket = undefined };
 
     var registry: metrics.Registry = .{};
-    var xport = RealityTransport.init(.{ .config = cfg, .cert_stub = &cert, .metrics = &registry });
+    var xport = RealityTransport.init(.{ .config = cfg, .cert_source = &cert, .metrics = &registry });
 
     const outcome = try xport.admit(.{
         .io = io,
@@ -1073,7 +1074,7 @@ test "RealityTransport.admit: valid CH cert_der appears verbatim inside the Cert
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var cert = try makeStubCertStub(io);
+    var cert = try makeStubCertSource(io);
     defer cert.deinit();
 
     const ctx = try makeTestCtx();
@@ -1095,7 +1096,7 @@ test "RealityTransport.admit: valid CH cert_der appears verbatim inside the Cert
     var w: std.Io.Writer = .fixed(&w_buf);
     const net_stream: std.Io.net.Stream = .{ .socket = undefined };
 
-    var xport = RealityTransport.init(.{ .config = cfg, .cert_stub = &cert });
+    var xport = RealityTransport.init(.{ .config = cfg, .cert_source = &cert });
     _ = try xport.admit(.{
         .io = io,
         .reader = &r,
@@ -1115,7 +1116,7 @@ test "RealityTransport.admit: valid CH cert_der appears verbatim inside the Cert
     // Certificate record. Inner plaintext = 4 (hs hdr) + 1 (req ctx len) + 3 (list len) + 3 (cert len) + cert_der.len + 2 (exts len) = 13 + cert_der.len.
     // Ciphertext = plaintext + 1 (inner type) + 16 (AEAD tag) = 30 + cert_der.len.
     const cert_enc_len: usize = @intCast(std.mem.readInt(u16, out[off + 3 ..][0..2], .big));
-    const expected_plaintext = 13 + cert.cert_der.len;
+    const expected_plaintext = 13 + cert.certDer().len;
     const expected_cipher = expected_plaintext + 1 + 16;
     try testing.expectEqual(expected_cipher, cert_enc_len);
 }
@@ -1128,7 +1129,7 @@ test "RealityTransport.admit: post-commit path allocates nothing on .silent (hea
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var cert = try makeStubCertStub(io);
+    var cert = try makeStubCertSource(io);
     defer cert.deinit();
 
     const ctx = try makeTestCtx();
@@ -1150,7 +1151,7 @@ test "RealityTransport.admit: post-commit path allocates nothing on .silent (hea
     var w: std.Io.Writer = .fixed(&w_buf);
     const net_stream: std.Io.net.Stream = .{ .socket = undefined };
 
-    var xport = RealityTransport.init(.{ .config = cfg, .cert_stub = &cert });
+    var xport = RealityTransport.init(.{ .config = cfg, .cert_source = &cert });
     const outcome = try xport.admit(.{
         .io = io,
         .reader = &r,
