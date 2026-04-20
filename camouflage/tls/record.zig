@@ -233,6 +233,50 @@ pub const Aes128GcmRecord = RecordLayer(std.crypto.aead.aes_gcm.Aes128Gcm);
 pub const Aes256GcmRecord = RecordLayer(std.crypto.aead.aes_gcm.Aes256Gcm);
 pub const ChaCha20Poly1305Record = RecordLayer(std.crypto.aead.chacha_poly.ChaCha20Poly1305);
 
+/// Read a full encrypted TLSCiphertext record (5-byte header +
+/// ciphertext + tag) from `reader` into `scratch`, then decrypt into
+/// `plaintext_out`. Returns an `OpenedRecord` describing the inner
+/// content type and plaintext length.
+///
+/// `scratch` must be at least `RecordHeader.wire_len + max_ciphertext_len`
+/// (5 + 16671 = 16676) bytes. `plaintext_out` must be at least
+/// `max_plaintext_len` (16384) bytes to fit any conformant record.
+///
+/// On any wire-level malformation (short header, wrong version, bad
+/// length) returns the underlying error. On AEAD failure returns
+/// `error.AuthenticationFailed`. EOF mid-record returns
+/// `error.EndOfStream`.
+pub fn ReadRecordExact(comptime AeadType: type) type {
+    const Layer = RecordLayer(AeadType);
+    return struct {
+        pub fn call(
+            layer: *Layer,
+            reader: *std.Io.Reader,
+            scratch: []u8,
+            plaintext_out: []u8,
+        ) !Layer.OpenedRecord {
+            if (scratch.len < RecordHeader.wire_len) return error.ShortBuffer;
+
+            // Read the 5-byte record header.
+            const hdr_bytes = try reader.take(RecordHeader.wire_len);
+            const hdr = try RecordHeader.parse(hdr_bytes[0..RecordHeader.wire_len]);
+            if (hdr.content_type != .application_data) return error.NotApplicationData;
+            if (hdr.length < Layer.tag_length + 1) return error.InvalidLength;
+            if (hdr.length > max_ciphertext_len) return error.RecordTooLarge;
+
+            const total = RecordHeader.wire_len + @as(usize, hdr.length);
+            if (scratch.len < total) return error.ShortBuffer;
+
+            // Copy header into scratch; read ciphertext+tag directly adjacent.
+            @memcpy(scratch[0..RecordHeader.wire_len], hdr_bytes[0..RecordHeader.wire_len]);
+            const ct_with_tag = try reader.take(hdr.length);
+            @memcpy(scratch[RecordHeader.wire_len..total], ct_with_tag);
+
+            return layer.openRecord(scratch[0..total], plaintext_out);
+        }
+    };
+}
+
 // -------------------- Tests --------------------
 
 const testing = std.testing;
@@ -405,6 +449,117 @@ test "openRecord: short buffer is rejected" {
     var layer: Aes128GcmRecord = .init([_]u8{0} ** 16, [_]u8{0} ** 12);
     var out: [32]u8 = undefined;
     try testing.expectError(error.ShortBuffer, layer.openRecord(&.{ 0x17, 0x03, 0x03 }, &out));
+}
+
+test "ReadRecordExact: round-trip with sealRecord over a fixed reader" {
+    const R = Aes128GcmRecord;
+    const key: [16]u8 = [_]u8{0x11} ** 16;
+    const iv: [12]u8 = [_]u8{0x22} ** 12;
+
+    var sender: R = .init(key, iv);
+    var wire: [64]u8 = undefined;
+    const n = try sender.sealRecord(.handshake, "round-trip", &wire);
+
+    var receiver: R = .init(key, iv);
+    var reader: std.Io.Reader = .fixed(wire[0..n]);
+    var scratch: [max_ciphertext_len + RecordHeader.wire_len]u8 = undefined;
+    var plaintext: [max_plaintext_len]u8 = undefined;
+    const opened = try ReadRecordExact(std.crypto.aead.aes_gcm.Aes128Gcm).call(
+        &receiver,
+        &reader,
+        &scratch,
+        &plaintext,
+    );
+    try testing.expectEqual(tls.ContentType.handshake, opened.inner_content_type);
+    try testing.expectEqualSlices(u8, "round-trip", plaintext[0..opened.plaintext_len]);
+    try testing.expectEqual(@as(u64, 1), receiver.seq);
+}
+
+test "ReadRecordExact: two successive records track sequence counter" {
+    const R = Aes128GcmRecord;
+    const key: [16]u8 = [_]u8{0x33} ** 16;
+    const iv: [12]u8 = [_]u8{0x44} ** 12;
+
+    var sender: R = .init(key, iv);
+    var wire: [128]u8 = undefined;
+    const n1 = try sender.sealRecord(.application_data, "first", &wire);
+    const n2 = try sender.sealRecord(.application_data, "second", wire[n1..]);
+
+    var receiver: R = .init(key, iv);
+    var reader: std.Io.Reader = .fixed(wire[0 .. n1 + n2]);
+    var scratch: [RecordHeader.wire_len + max_ciphertext_len]u8 = undefined;
+    var plaintext: [max_plaintext_len]u8 = undefined;
+
+    const o1 = try ReadRecordExact(std.crypto.aead.aes_gcm.Aes128Gcm).call(
+        &receiver,
+        &reader,
+        &scratch,
+        &plaintext,
+    );
+    try testing.expectEqualSlices(u8, "first", plaintext[0..o1.plaintext_len]);
+
+    const o2 = try ReadRecordExact(std.crypto.aead.aes_gcm.Aes128Gcm).call(
+        &receiver,
+        &reader,
+        &scratch,
+        &plaintext,
+    );
+    try testing.expectEqualSlices(u8, "second", plaintext[0..o2.plaintext_len]);
+    try testing.expectEqual(@as(u64, 2), receiver.seq);
+}
+
+test "ReadRecordExact: outer type != application_data => NotApplicationData" {
+    const R = Aes128GcmRecord;
+    var receiver: R = .init([_]u8{0} ** 16, [_]u8{0} ** 12);
+    // Forge a handshake-typed record header with a small payload.
+    const wire = [_]u8{ 0x16, 0x03, 0x03, 0x00, 0x11 } ++ [_]u8{0x00} ** 17;
+    var reader: std.Io.Reader = .fixed(&wire);
+    var scratch: [RecordHeader.wire_len + max_ciphertext_len]u8 = undefined;
+    var plaintext: [max_plaintext_len]u8 = undefined;
+    try testing.expectError(error.NotApplicationData, ReadRecordExact(std.crypto.aead.aes_gcm.Aes128Gcm).call(
+        &receiver,
+        &reader,
+        &scratch,
+        &plaintext,
+    ));
+}
+
+test "ReadRecordExact: tag tamper is rejected as AuthenticationFailed" {
+    const R = Aes128GcmRecord;
+    const key: [16]u8 = [_]u8{0x55} ** 16;
+    const iv: [12]u8 = [_]u8{0x66} ** 12;
+
+    var sender: R = .init(key, iv);
+    var wire: [64]u8 = undefined;
+    const n = try sender.sealRecord(.application_data, "payload", &wire);
+    wire[n - 1] ^= 0xFF;
+
+    var receiver: R = .init(key, iv);
+    var reader: std.Io.Reader = .fixed(wire[0..n]);
+    var scratch: [RecordHeader.wire_len + max_ciphertext_len]u8 = undefined;
+    var plaintext: [max_plaintext_len]u8 = undefined;
+    try testing.expectError(error.AuthenticationFailed, ReadRecordExact(std.crypto.aead.aes_gcm.Aes128Gcm).call(
+        &receiver,
+        &reader,
+        &scratch,
+        &plaintext,
+    ));
+}
+
+test "ReadRecordExact: truncated wire returns EndOfStream" {
+    const R = Aes128GcmRecord;
+    var receiver: R = .init([_]u8{0} ** 16, [_]u8{0} ** 12);
+    // Only 3 bytes — header needs 5.
+    const truncated = [_]u8{ 0x17, 0x03, 0x03 };
+    var reader: std.Io.Reader = .fixed(&truncated);
+    var scratch: [RecordHeader.wire_len + max_ciphertext_len]u8 = undefined;
+    var plaintext: [max_plaintext_len]u8 = undefined;
+    try testing.expectError(error.EndOfStream, ReadRecordExact(std.crypto.aead.aes_gcm.Aes128Gcm).call(
+        &receiver,
+        &reader,
+        &scratch,
+        &plaintext,
+    ));
 }
 
 test "openRecord: inner content type reflects what sealRecord tagged" {
