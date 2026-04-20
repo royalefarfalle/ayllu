@@ -10,6 +10,7 @@ pub const client_hello = @import("client_hello.zig");
 pub const server_hello = @import("server_hello.zig");
 pub const xray_wire = @import("xray_wire.zig");
 pub const reality_transport = @import("reality_transport.zig");
+pub const stream = @import("stream.zig");
 
 test {
     _ = record;
@@ -18,5 +19,6 @@ test {
     _ = server_hello;
     _ = xray_wire;
     _ = reality_transport;
+    _ = stream;
     _ = @import("xray_v25_vectors.zig");
 }
