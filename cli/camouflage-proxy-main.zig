@@ -13,6 +13,9 @@ pub fn main(init: std.process.Init) !void {
     var listen_host: []const u8 = default_listen_host;
     var listen_port: u16 = default_listen_port;
     var listen_addr: ?std.Io.net.IpAddress = null;
+    var reality_listen_host: ?[]const u8 = null;
+    var reality_listen_port: u16 = 0;
+    var reality_listen_addr: ?std.Io.net.IpAddress = null;
     var target: ?ayllu_camouflage.reality.Target = null;
     var private_key: ?[ayllu_camouflage.reality.key_length]u8 = null;
     var min_client_version: ?std.SemanticVersion = null;
@@ -36,6 +39,26 @@ pub fn main(init: std.process.Init) !void {
             listen_host = parsed_host;
             listen_port = parsed_port;
             listen_addr = parsed_addr;
+        } else if (std.mem.eql(u8, args[i], "--reality-listen")) {
+            i += 1;
+            if (i >= args.len) return error.MissingRealityListenValue;
+            const parsed_host, const parsed_port, const parsed_addr = try parseListenSpec(args[i]);
+            reality_listen_host = parsed_host;
+            reality_listen_port = parsed_port;
+            reality_listen_addr = parsed_addr;
+        } else if (std.mem.eql(u8, args[i], "--inner-protocol")) {
+            i += 1;
+            if (i >= args.len) return error.MissingInnerProtocolValue;
+            // C5b wires VLESS to the pivoted stream; for now only
+            // socks5 is supported. The flag reserves the syntax so
+            // scripts written today keep working once VLESS lands.
+            if (std.mem.eql(u8, args[i], "socks5")) {
+                // no-op (default)
+            } else if (std.mem.eql(u8, args[i], "vless")) {
+                return error.VlessInnerProtocolNotYetSupported;
+            } else {
+                return error.UnknownInnerProtocol;
+            }
         } else if (std.mem.eql(u8, args[i], "--target")) {
             i += 1;
             if (i >= args.len) return error.MissingTargetValue;
@@ -153,12 +176,27 @@ pub fn main(init: std.process.Init) !void {
     var server = try addr.listen(io, .{ .reuse_address = true });
     defer server.deinit(io);
 
+    // Optional second listener for REALITY-speaking clients. Shares
+    // the same `state` so metrics and rate-limit buckets are unified.
+    var reality_server_storage: ?std.Io.net.Server = null;
+    if (reality_listen_addr) |r_addr| {
+        reality_server_storage = try r_addr.listen(io, .{ .reuse_address = true });
+        _ = io.async(realityAcceptLoop, .{ io, &reality_server_storage.?, &state });
+    }
+    defer if (reality_server_storage) |*s| s.deinit(io);
+
     var stdout_buffer: [512]u8 = undefined;
     var stdout_writer: std.Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
     try stdout_writer.interface.print(
         "ayllu-camouflage-proxy listening on {s}:{d} -> camouflage target {s}:{d}\n",
         .{ listen_host, listen_port, reality_config.target.host, reality_config.target.port },
     );
+    if (reality_listen_host) |rh| {
+        try stdout_writer.interface.print(
+            "  reality listener on {s}:{d}\n",
+            .{ rh, reality_listen_port },
+        );
+    }
     try stdout_writer.interface.flush();
 
     while (true) {
@@ -168,6 +206,34 @@ pub fn main(init: std.process.Init) !void {
         };
         _ = io.async(sessionWrapper, .{ io, client_stream.socket, &state });
     }
+}
+
+fn realityAcceptLoop(
+    io: std.Io,
+    server: *std.Io.net.Server,
+    state: *ayllu_camouflage.server.State,
+) !void {
+    while (true) {
+        const client_stream = server.accept(io) catch |err| switch (err) {
+            error.SocketNotListening => return,
+            else => {
+                std.log.warn("reality accept failed: {t}", .{err});
+                continue;
+            },
+        };
+        _ = io.async(realitySessionWrapper, .{ io, client_stream.socket, state });
+    }
+}
+
+fn realitySessionWrapper(io: std.Io, socket: std.Io.net.Socket, state: *ayllu_camouflage.server.State) void {
+    var xport = ayllu_camouflage.tls.reality_transport.RealityTransport.init(.{
+        .config = state.config.pivot.reality,
+        .metrics = state.metrics,
+    });
+    ayllu_camouflage.server.dispatch(io, socket, state, xport.outerTransport()) catch |err| switch (err) {
+        error.EndOfStream, error.Canceled => {},
+        else => std.log.warn("reality session ended: {t}", .{err}),
+    };
 }
 
 fn sessionWrapper(io: std.Io, socket: std.Io.net.Socket, state: *ayllu_camouflage.server.State) void {
@@ -193,7 +259,12 @@ fn printUsage(io: std.Io) !void {
         \\  --short-id HEX             accepted short id (repeatable)
         \\
         \\Options:
-        \\  --listen HOST:PORT         bind address (default 0.0.0.0:443)
+        \\  --listen HOST:PORT         legacy-HTTP bind address (default 0.0.0.0:443)
+        \\  --reality-listen HOST:PORT optional second listener speaking TLS 1.3
+        \\                             REALITY (Xray v25.x wire-compat).
+        \\  --inner-protocol {socks5|vless}  inner protocol inside the
+        \\                             REALITY stream. Only socks5 is wired in
+        \\                             this build; vless lands in C5b.
         \\  --auth-file PATH           inner SOCKS username:password file
         \\  --max-time-diff-ms N       clock skew allowance (default 5000)
         \\  --token-slot-ms N          token slot size (default 1000)

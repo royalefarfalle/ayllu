@@ -18,6 +18,7 @@ const tls = std.crypto.tls;
 const proxy = @import("ayllu-proxy");
 const transport = @import("../transport.zig");
 const reality = @import("../reality.zig");
+const metrics_mod = @import("../metrics.zig");
 const record = @import("record.zig");
 const client_hello_mod = @import("client_hello.zig");
 const xray_wire = @import("xray_wire.zig");
@@ -25,9 +26,14 @@ const xray_wire = @import("xray_wire.zig");
 pub const alpn_scratch_capacity: usize = 8;
 
 /// Shared state handed to every `RealityTransport` instance. `config`
-/// is borrowed — the caller (typically `State`) owns it.
+/// is borrowed — the caller (typically `State`) owns it. `metrics` is
+/// optional; when present the transport bumps
+/// `admission_reality_rejected_total` on every `.fallback` return so
+/// operators can distinguish REALITY-specific rejects from LegacyHttp
+/// admission traffic.
 pub const Shared = struct {
     config: reality.Config,
+    metrics: ?*metrics_mod.Registry = null,
 };
 
 pub const RealityTransport = struct {
@@ -58,6 +64,11 @@ pub const RealityTransport = struct {
         return self.admit(admission);
     }
 
+    fn fallback(self: *RealityTransport, buffered_head: []const u8) transport.AdmitOutcome {
+        if (self.shared.metrics) |m| m.admission_reality_rejected_total.inc();
+        return .{ .fallback = .{ .buffered_head = buffered_head } };
+    }
+
     pub fn admit(
         self: *RealityTransport,
         admission: transport.AdmissionContext,
@@ -76,19 +87,13 @@ pub const RealityTransport = struct {
             admission_deadline,
         ) catch |err| switch (err) {
             error.EndOfStream, error.Timeout => return err,
-            else => return transport.AdmitOutcome{
-                .fallback = .{ .buffered_head = admission.reader.buffered() },
-            },
+            else => return self.fallback(admission.reader.buffered()),
         };
         const hdr = record.RecordHeader.parse(hdr_bytes[0..record.RecordHeader.wire_len]) catch {
-            return transport.AdmitOutcome{
-                .fallback = .{ .buffered_head = admission.reader.buffered() },
-            };
+            return self.fallback(admission.reader.buffered());
         };
         if (hdr.content_type != .handshake or hdr.length > record.max_plaintext_len or hdr.length < 4) {
-            return transport.AdmitOutcome{
-                .fallback = .{ .buffered_head = admission.reader.buffered() },
-            };
+            return self.fallback(admission.reader.buffered());
         }
 
         const record_total = record.RecordHeader.wire_len + @as(usize, hdr.length);
@@ -99,48 +104,34 @@ pub const RealityTransport = struct {
             admission_deadline,
         ) catch |err| switch (err) {
             error.EndOfStream, error.Timeout => return err,
-            else => return transport.AdmitOutcome{
-                .fallback = .{ .buffered_head = admission.reader.buffered() },
-            },
+            else => return self.fallback(admission.reader.buffered()),
         };
 
         const payload = full[record.RecordHeader.wire_len..record_total];
         // Inner handshake header: [type u8 | u24 body length].
         if (payload[0] != @intFromEnum(tls.HandshakeType.client_hello)) {
-            return transport.AdmitOutcome{
-                .fallback = .{ .buffered_head = admission.reader.buffered() },
-            };
+            return self.fallback(admission.reader.buffered());
         }
         const body_len = (@as(usize, payload[1]) << 16) |
             (@as(usize, payload[2]) << 8) |
             @as(usize, payload[3]);
         if (payload.len != 4 + body_len) {
-            return transport.AdmitOutcome{
-                .fallback = .{ .buffered_head = admission.reader.buffered() },
-            };
+            return self.fallback(admission.reader.buffered());
         }
         const ch_body = payload[4 .. 4 + body_len];
 
         var scratch_alpn: [alpn_scratch_capacity]?[]const u8 = @splat(null);
         const hello = client_hello_mod.parse(ch_body, &scratch_alpn) catch {
-            return transport.AdmitOutcome{
-                .fallback = .{ .buffered_head = admission.reader.buffered() },
-            };
+            return self.fallback(admission.reader.buffered());
         };
 
         // Structural gate — any miss routes to cover.
         if (!hello.supports_tls_13 or hello.x25519_key_share == null) {
-            return transport.AdmitOutcome{
-                .fallback = .{ .buffered_head = admission.reader.buffered() },
-            };
+            return self.fallback(admission.reader.buffered());
         }
-        const sni = hello.server_name orelse return transport.AdmitOutcome{
-            .fallback = .{ .buffered_head = admission.reader.buffered() },
-        };
+        const sni = hello.server_name orelse return self.fallback(admission.reader.buffered());
         if (!containsServerName(self.shared.config.server_names, sni)) {
-            return transport.AdmitOutcome{
-                .fallback = .{ .buffered_head = admission.reader.buffered() },
-            };
+            return self.fallback(admission.reader.buffered());
         }
 
         // AuthKey binding. MAC fail / version skew / unknown short_id
@@ -150,9 +141,7 @@ pub const RealityTransport = struct {
             hello,
             nowUnixMs(admission.io),
         ) catch {
-            return transport.AdmitOutcome{
-                .fallback = .{ .buffered_head = admission.reader.buffered() },
-            };
+            return self.fallback(admission.reader.buffered());
         };
 
         // Commit: consume the ClientHello record, emit the 101-Switching
@@ -197,6 +186,7 @@ fn nowUnixMs(io: std.Io) i64 {
 const testing = std.testing;
 const ayllu = @import("ayllu");
 const rate_limit = @import("../rate_limit.zig");
+const metrics = @import("../metrics.zig");
 
 fn hex32(comptime s: *const [64]u8) [32]u8 {
     var out: [32]u8 = undefined;
@@ -541,6 +531,35 @@ test "RealityTransport.admit: happy path writes 101 marker and returns pivoted" 
     try testing.expect(std.mem.indexOf(u8, w.buffered(), "Upgrade: ayllu-reality") != null);
     // ClientHello record fully consumed — reader has no bytes left.
     try testing.expectEqual(@as(usize, 0), r.buffered().len);
+}
+
+test "RealityTransport.admit: fallback bumps admission_reality_rejected_total via metrics" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const garbage = "GET / HTTP/1.1\r\n\r\n";
+    var r: std.Io.Reader = .fixed(garbage);
+    var wbuf: [64]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&wbuf);
+    const net_stream: std.Io.net.Stream = .{ .socket = undefined };
+
+    var registry: metrics.Registry = .{};
+    const ctx = try makeTestCtx();
+    var xport = RealityTransport.init(.{ .config = ctx.config(0), .metrics = &registry });
+
+    const outcome = try xport.admit(.{
+        .io = io,
+        .reader = &r,
+        .writer = &w,
+        .net_stream = &net_stream,
+        .peer_key = rate_limit.ipv4_zero_prefix,
+    });
+    try testing.expectEqual(
+        std.meta.Tag(transport.AdmitOutcome).fallback,
+        std.meta.activeTag(outcome),
+    );
+    try testing.expectEqual(@as(u64, 1), registry.admission_reality_rejected_total.load());
 }
 
 test "RealityTransport.admit: truncated record (short read) => EndOfStream" {

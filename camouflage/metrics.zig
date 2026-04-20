@@ -32,6 +32,12 @@ pub const Registry = struct {
     upstream_connect_errors_total: Counter = .{},
     handshake_timeouts_total: Counter = .{},
     bytes_relayed_total: Counter = .{},
+    /// Sub-counter of admission_fallback_total: bumped only when the
+    /// REALITY transport rejects a session (SNI miss, missing X25519,
+    /// bad AuthKey MAC, etc.). Exists alongside the generic fallback
+    /// counter so operators can tell REALITY-specific probes apart
+    /// from the LegacyHttp admission traffic.
+    admission_reality_rejected_total: Counter = .{},
 
     /// Render the full registry in Prometheus text format (openmetrics 0.0.4).
     pub fn render(self: *const Registry, w: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -42,6 +48,7 @@ pub const Registry = struct {
         try renderCounter(w, "ayllu_upstream_connect_errors_total", self.upstream_connect_errors_total.load());
         try renderCounter(w, "ayllu_handshake_timeouts_total", self.handshake_timeouts_total.load());
         try renderCounter(w, "ayllu_bytes_relayed_total", self.bytes_relayed_total.load());
+        try renderCounter(w, "ayllu_admission_reality_rejected_total", self.admission_reality_rejected_total.load());
     }
 };
 
@@ -124,6 +131,19 @@ test "Registry: zero-counter renders zero values" {
     try reg.render(&w);
     const out = w.buffered();
     try std.testing.expect(std.mem.indexOf(u8, out, "ayllu_sessions_total 0\n") != null);
+}
+
+test "Registry: admission_reality_rejected_total is exposed in render output" {
+    var reg: Registry = .{};
+    reg.admission_reality_rejected_total.add(7);
+
+    var buf: [2048]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try reg.render(&w);
+
+    const out = w.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, out, "# TYPE ayllu_admission_reality_rejected_total counter\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "ayllu_admission_reality_rejected_total 7\n") != null);
 }
 
 fn acceptAndHandleOnce(io: std.Io, server: *std.Io.net.Server, registry: *const Registry) anyerror!void {
