@@ -8,10 +8,15 @@ pub const record = @import("record.zig");
 pub const keys = @import("keys.zig");
 pub const client_hello = @import("client_hello.zig");
 pub const server_hello = @import("server_hello.zig");
+pub const xray_wire = @import("xray_wire.zig");
+pub const reality_transport = @import("reality_transport.zig");
 
 test {
     _ = record;
     _ = keys;
     _ = client_hello;
     _ = server_hello;
+    _ = xray_wire;
+    _ = reality_transport;
+    _ = @import("xray_v25_vectors.zig");
 }
