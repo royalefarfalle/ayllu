@@ -12,6 +12,7 @@ pub const legacy_http_transport = @import("legacy_http_transport.zig");
 pub const tls = @import("tls/root.zig");
 pub const server = @import("server.zig");
 pub const client = @import("client.zig");
+pub const vless = @import("vless.zig");
 
 test {
     _ = reality;
@@ -26,4 +27,5 @@ test {
     _ = tls;
     _ = server;
     _ = client;
+    _ = vless;
 }
