@@ -33,6 +33,7 @@ const xray_wire = @import("xray_wire.zig");
 const keys_mod = @import("keys.zig");
 const stream_mod = @import("stream.zig");
 const cert_stub_mod = @import("cert_stub.zig");
+const vless_mod = @import("../vless.zig");
 
 pub const alpn_scratch_capacity: usize = 8;
 
@@ -196,6 +197,24 @@ pub const RealityTransport = struct {
             return self.silentHandshakeFailure();
         };
 
+        // ----- Inner-protocol branch -----
+        const inner_target = switch (self.shared.config.inner_protocol) {
+            .socks5 => @as(?transport.InnerTarget, null),
+            .vless => blk: {
+                const expected = self.shared.config.vless_uuid orelse {
+                    admission.allocator.destroy(ss);
+                    return self.silentHandshakeFailure();
+                };
+                const parsed = readVlessInner(&ss.tls_reader.interface, expected) catch {
+                    if (self.shared.metrics) |m| m.vless_header_rejected_total.inc();
+                    admission.allocator.destroy(ss);
+                    return .silent;
+                };
+                if (self.shared.metrics) |m| m.vless_accepted_total.inc();
+                break :blk @as(?transport.InnerTarget, parsed);
+            },
+        };
+
         return transport.AdmitOutcome{
             .pivoted = .{
                 .stream = .{
@@ -203,6 +222,7 @@ pub const RealityTransport = struct {
                     .writer = &ss.tls_writer.interface,
                     .net_stream = admission.net_stream,
                 },
+                .inner_target = inner_target,
                 .on_close = SessionState.destroyOnClose,
                 .ctx_for_close = @ptrCast(ss),
             },
@@ -421,6 +441,47 @@ fn containsServerName(list: []const []const u8, candidate: []const u8) bool {
 
 fn nowUnixMs(io: std.Io) i64 {
     return @intCast(@divFloor(std.Io.Clock.real.now(io).nanoseconds, 1_000_000));
+}
+
+/// Peek-and-parse a VLESS v1 request header from `r`'s plaintext,
+/// validate the UUID (constant-time) and command, consume the header
+/// bytes, and return the target for the dispatcher to dial. Separated
+/// from `RealityTransport.admit` so it's unit-testable with a plain
+/// `Reader.fixed` — the TLS wrapping is orthogonal to this gate.
+///
+/// Any failure here is a post-commit silent drop at the caller.
+fn readVlessInner(r: *std.Io.Reader, expected_uuid: [16]u8) !transport.InnerTarget {
+    const max_header: usize = 320;
+    var need: usize = vless_mod.min_header_length;
+    while (true) {
+        const buf = try r.peekGreedy(need);
+        if (vless_mod.parseHeader(buf)) |parsed| {
+            const hdr = parsed[0];
+            const consumed = parsed[1];
+
+            if (!std.crypto.timing_safe.eql([16]u8, hdr.uuid, expected_uuid)) {
+                return error.UuidMismatch;
+            }
+            if (hdr.command != .tcp) return error.UnsupportedVlessCommand;
+
+            _ = try r.take(consumed);
+
+            return .{
+                .address = switch (hdr.address) {
+                    .ipv4 => |v| .{ .ipv4 = v },
+                    .ipv6 => |v| .{ .ipv6 = v },
+                    .domain => |d| .{ .domain = d },
+                },
+                .port = hdr.port,
+            };
+        } else |err| switch (err) {
+            error.ShortBuffer => {
+                if (buf.len >= max_header) return error.VlessHeaderTooLarge;
+                need = @min(buf.len + 16, max_header);
+            },
+            else => return err,
+        }
+    }
 }
 
 // -------------------- Tests --------------------
@@ -1100,4 +1161,139 @@ test "RealityTransport.admit: post-commit path allocates nothing on .silent (hea
     });
     try testing.expectEqual(transport.AdmitOutcome.silent, outcome);
     // testing.allocator asserts no unfreed allocations on teardown.
+}
+
+// -------------------- VLESS inner-branch tests --------------------
+
+/// Minimal VLESS v1 header builder — duplicates vless.zig's test helper
+/// locally so we don't export a test-only symbol from the parser.
+fn buildVlessHeaderBytes(
+    out: []u8,
+    uuid: [16]u8,
+    command: u8,
+    port: u16,
+    addr_bytes: []const u8, // addr_type || variable addr
+) usize {
+    var p: usize = 0;
+    out[p] = 0x00; // version v1
+    p += 1;
+    @memcpy(out[p .. p + 16], &uuid);
+    p += 16;
+    out[p] = 0; // addon_len
+    p += 1;
+    out[p] = command;
+    p += 1;
+    std.mem.writeInt(u16, out[p..][0..2], port, .big);
+    p += 2;
+    @memcpy(out[p .. p + addr_bytes.len], addr_bytes);
+    return p + addr_bytes.len;
+}
+
+test "readVlessInner: IPv4 TCP happy path returns correct target" {
+    const expected_uuid = [_]u8{0x42} ** 16;
+    var buf: [64]u8 = undefined;
+    const addr = [_]u8{ 0x01, 192, 0, 2, 1 }; // ipv4 type + 192.0.2.1
+    const n = buildVlessHeaderBytes(&buf, expected_uuid, 0x01, 443, &addr);
+
+    var r: std.Io.Reader = .fixed(buf[0..n]);
+    const target = try readVlessInner(&r, expected_uuid);
+
+    try testing.expectEqualSlices(u8, &.{ 192, 0, 2, 1 }, &target.address.ipv4);
+    try testing.expectEqual(@as(u16, 443), target.port);
+    try testing.expectEqual(@as(usize, 0), r.buffered().len);
+}
+
+test "readVlessInner: Domain TCP happy path — slice into plaintext buffer" {
+    const expected_uuid = [_]u8{0xAB} ** 16;
+    const domain = "ziglang.org";
+    var addr_buf: [16]u8 = undefined;
+    addr_buf[0] = 0x02; // domain type
+    addr_buf[1] = @intCast(domain.len);
+    @memcpy(addr_buf[2 .. 2 + domain.len], domain);
+
+    var buf: [64]u8 = undefined;
+    const n = buildVlessHeaderBytes(&buf, expected_uuid, 0x01, 80, addr_buf[0 .. 2 + domain.len]);
+
+    var r: std.Io.Reader = .fixed(buf[0..n]);
+    const target = try readVlessInner(&r, expected_uuid);
+
+    try testing.expectEqualStrings(domain, target.address.domain);
+    try testing.expectEqual(@as(u16, 80), target.port);
+}
+
+test "readVlessInner: IPv6 TCP" {
+    const expected_uuid = [_]u8{0xEE} ** 16;
+    var addr_buf: [17]u8 = undefined;
+    addr_buf[0] = 0x03; // ipv6 type
+    for (addr_buf[1..17], 0..) |*b, i| b.* = @intCast(i);
+
+    var buf: [64]u8 = undefined;
+    const n = buildVlessHeaderBytes(&buf, expected_uuid, 0x01, 8443, &addr_buf);
+
+    var r: std.Io.Reader = .fixed(buf[0..n]);
+    const target = try readVlessInner(&r, expected_uuid);
+
+    for (target.address.ipv6, 0..) |b, i| try testing.expectEqual(@as(u8, @intCast(i)), b);
+    try testing.expectEqual(@as(u16, 8443), target.port);
+}
+
+test "readVlessInner: UUID mismatch => error.UuidMismatch (no byte consumed)" {
+    const sent_uuid = [_]u8{0x11} ** 16;
+    const expected_uuid = [_]u8{0x22} ** 16;
+    const addr = [_]u8{ 0x01, 10, 0, 0, 1 };
+    var buf: [64]u8 = undefined;
+    const n = buildVlessHeaderBytes(&buf, sent_uuid, 0x01, 443, &addr);
+
+    var r: std.Io.Reader = .fixed(buf[0..n]);
+    try testing.expectError(error.UuidMismatch, readVlessInner(&r, expected_uuid));
+    // Implementation detail: bytes were peeked but not taken on the
+    // error path. Caller (admit) drops the session `.silent` anyway.
+    try testing.expectEqual(n, r.buffered().len);
+}
+
+test "readVlessInner: UDP command => UnsupportedVlessCommand" {
+    const uuid = [_]u8{0x77} ** 16;
+    const addr = [_]u8{ 0x01, 1, 1, 1, 1 };
+    var buf: [64]u8 = undefined;
+    const n = buildVlessHeaderBytes(&buf, uuid, 0x02, 53, &addr);
+
+    var r: std.Io.Reader = .fixed(buf[0..n]);
+    try testing.expectError(error.UnsupportedVlessCommand, readVlessInner(&r, uuid));
+}
+
+test "readVlessInner: truncated header surfaces EndOfStream" {
+    const uuid = [_]u8{0x55} ** 16;
+    const addr = [_]u8{ 0x01, 8, 8, 8, 8 };
+    var buf: [64]u8 = undefined;
+    const n = buildVlessHeaderBytes(&buf, uuid, 0x01, 443, &addr);
+
+    // Feed only half of the header.
+    var r: std.Io.Reader = .fixed(buf[0 .. n - 3]);
+    try testing.expectError(error.EndOfStream, readVlessInner(&r, uuid));
+}
+
+test "readVlessInner: extra bytes after header stay in reader buffer for the relay loop" {
+    const uuid = [_]u8{0x99} ** 16;
+    const addr = [_]u8{ 0x01, 127, 0, 0, 1 };
+    var buf: [128]u8 = undefined;
+    const n = buildVlessHeaderBytes(&buf, uuid, 0x01, 8080, &addr);
+    const trailing = "hello";
+    @memcpy(buf[n..][0..trailing.len], trailing);
+
+    var r: std.Io.Reader = .fixed(buf[0 .. n + trailing.len]);
+    _ = try readVlessInner(&r, uuid);
+    // Header consumed; only the trailing tunnel payload remains.
+    try testing.expectEqualStrings(trailing, r.buffered());
+}
+
+test "readVlessInner: port = 0 is accepted by this gate (parseHeader catches it)" {
+    // vless.parseHeader rejects port=0 with InvalidPort; readVlessInner
+    // relays that through.
+    const uuid = [_]u8{0x33} ** 16;
+    const addr = [_]u8{ 0x01, 1, 2, 3, 4 };
+    var buf: [64]u8 = undefined;
+    const n = buildVlessHeaderBytes(&buf, uuid, 0x01, 0, &addr);
+
+    var r: std.Io.Reader = .fixed(buf[0..n]);
+    try testing.expectError(error.InvalidPort, readVlessInner(&r, uuid));
 }

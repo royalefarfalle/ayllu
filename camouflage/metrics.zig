@@ -44,6 +44,14 @@ pub const Registry = struct {
     /// `_rejected_total` because the failure modes are different
     /// (handshake-phase MAC failure, TlsReader truncation, alloc OOM).
     admission_reality_handshake_failed_total: Counter = .{},
+    /// VLESS inner header accepted (UUID matched, TCP command, valid
+    /// address). Only bumped when `--inner-protocol vless` is active.
+    vless_accepted_total: Counter = .{},
+    /// VLESS inner header rejected (truncated, UUID mismatch,
+    /// unsupported command, bad address type). Session always drops to
+    /// `.silent` from this path — mismatch wouldn't deserve cover
+    /// treatment because we already proved a valid REALITY client.
+    vless_header_rejected_total: Counter = .{},
 
     /// Render the full registry in Prometheus text format (openmetrics 0.0.4).
     pub fn render(self: *const Registry, w: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -56,6 +64,8 @@ pub const Registry = struct {
         try renderCounter(w, "ayllu_bytes_relayed_total", self.bytes_relayed_total.load());
         try renderCounter(w, "ayllu_admission_reality_rejected_total", self.admission_reality_rejected_total.load());
         try renderCounter(w, "ayllu_admission_reality_handshake_failed_total", self.admission_reality_handshake_failed_total.load());
+        try renderCounter(w, "ayllu_vless_accepted_total", self.vless_accepted_total.load());
+        try renderCounter(w, "ayllu_vless_header_rejected_total", self.vless_header_rejected_total.load());
     }
 };
 
