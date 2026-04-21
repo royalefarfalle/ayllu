@@ -52,7 +52,15 @@ pub const ExternalCert = struct {
         self: *const ExternalCert,
         transcript_hash: []const u8,
     ) !([Ed25519.Signature.encoded_length]u8) {
-        return signCertificateVerifyWithKey(self.keypair, transcript_hash);
+        const prefix_len = 64 + 33 + 1;
+        var msg_buf: [prefix_len + 64]u8 = undefined;
+        if (transcript_hash.len > 64) return error.TranscriptTooLarge;
+        @memset(msg_buf[0..64], 0x20);
+        @memcpy(msg_buf[64..][0..33], "TLS 1.3, server CertificateVerify");
+        msg_buf[64 + 33] = 0x00;
+        @memcpy(msg_buf[prefix_len..][0..transcript_hash.len], transcript_hash);
+        const sig = try self.keypair.sign(msg_buf[0 .. prefix_len + transcript_hash.len], null);
+        return sig.toBytes();
     }
 };
 
@@ -84,24 +92,6 @@ pub const CertSource = union(enum) {
         }
     }
 };
-
-/// Format the TLS 1.3 CertificateVerify context and sign it with
-/// `keypair`. Shared between `ExternalCert` here and `CertStub` (which
-/// keeps its own identical copy for self-containment).
-fn signCertificateVerifyWithKey(
-    keypair: Ed25519.KeyPair,
-    transcript_hash: []const u8,
-) !([Ed25519.Signature.encoded_length]u8) {
-    const prefix_len = 64 + 33 + 1;
-    var msg_buf: [prefix_len + 64]u8 = undefined;
-    if (transcript_hash.len > 64) return error.TranscriptTooLarge;
-    @memset(msg_buf[0..64], 0x20);
-    @memcpy(msg_buf[64..][0..33], "TLS 1.3, server CertificateVerify");
-    msg_buf[64 + 33] = 0x00;
-    @memcpy(msg_buf[prefix_len..][0..transcript_hash.len], transcript_hash);
-    const sig = try keypair.sign(msg_buf[0 .. prefix_len + transcript_hash.len], null);
-    return sig.toBytes();
-}
 
 /// Parse the outer SEQUENCE tag + length of a DER-encoded certificate.
 /// Returns `(encoded_length, header_byte_count)`. Accepts short form
